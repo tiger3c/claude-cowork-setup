@@ -1,5 +1,0 @@
-# Installers are large (GitHub limit 100MB) - put them in files\ locally only
-files/*
-!files/.gitkeep
-logs/
-*.partial

@@ -1,4 +1,0 @@
-# Windows scripts are stored with CRLF (+ UTF-8 BOM for setup.ps1) exactly as-is.
-*.ps1 -text
-*.bat -text
-*.cmd -text

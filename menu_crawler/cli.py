@@ -437,13 +437,21 @@ def choose_board(args, interactive):
         if not interactive:
             kind = "google"
         else:
-            last = state.last_workbook()
-            print("  작업할 진단 엑셀 파일을 붙여넣어 주세요. (파일을 이 창에 끌어다 놓아도 됩니다)")
-            if last:
-                print("  " + ui.dim(f"Enter = 지난번 파일 {Path(last).name}"))
-            print("  " + ui.dim("g = 구글 시트에 바로 입력 | p = 구글 시트 붙여넣기 | " + ("- = 기입 없이 수집만" if last else "Enter = 기입 없이 수집만")))
+            linked = gsheet.load_config() is not None
+            last = "" if linked else state.last_workbook()
+            if linked:
+                print("  " + ui.bold("Enter = 구글 시트에 바로 입력") + ui.dim("  (연결된 진단표, 값만 입력)"))
+                print("  " + ui.dim("엑셀 파일로 하려면 파일을 끌어다 놓기 | p = 구글 시트 붙여넣기 | - = 기입 없이 수집만"))
+            else:
+                print("  작업할 진단 엑셀 파일을 붙여넣어 주세요. (파일을 이 창에 끌어다 놓아도 됩니다)")
+                if last:
+                    print("  " + ui.dim(f"Enter = 지난번 파일 {Path(last).name}"))
+                print("  " + ui.dim("g = 구글 시트에 바로 입력 (처음 1회 연결) | p = 구글 시트 붙여넣기 | "
+                                    + ("- = 기입 없이 수집만" if last else "Enter = 기입 없이 수집만")))
             while True:
-                value = ask("  작업 엑셀").strip().strip('"').strip("'").strip()
+                value = ask("  진단표" if linked else "  작업 엑셀").strip().strip('"').strip("'").strip()
+                if not value and linked:
+                    value = "g"
                 if not value and last:
                     value = last
                 if value.lower() in {"g", "ㅎ"}:
@@ -467,7 +475,15 @@ def choose_board(args, interactive):
             if interactive and not args.target:
                 return choose_board(args, interactive)
             return None
-        return SheetsBoard(client)
+        board = SheetsBoard(client)
+        if interactive:
+            print("  구글 시트를 읽는 중입니다...")
+            try:
+                board.cached = board.targets()
+            except SheetError as exc:
+                sys.exit(str(exc))
+            ui.ok(f"구글 시트 '{board.title}' | 진단 시트 {len(board.cached)}개")
+        return board
     if kind == "google":
         snapshot = args.snapshot
         if not snapshot and interactive:

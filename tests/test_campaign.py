@@ -159,3 +159,33 @@ def test_script_menus_on_a_legacy_english_site_are_filled(tmp_path, monkeypatch)
         assert again == cols
     finally:
         server.shutdown()
+
+
+def test_google_sheet_is_the_default_when_connected(site, tmp_path, monkeypatch):  # noqa: F811
+    from menu_crawler import gsheet
+    sheet = {"menus": [["기존 메뉴", "", ""]], "d6": site}
+    calls = []
+
+    def call(self, action, **payload):
+        calls.append((action, payload.get("dryRun")))
+        if action == "ping":
+            return {"ok": True, "title": "진단표"}
+        if action == "targets":
+            return {"ok": True, "title": "진단표", "targets": [{"sheet": "05_사이트", "name": "사이트", "domain": sheet["d6"],
+                                                             "menus": len(sheet["menus"]), "start": 8 + len(sheet["menus"])}]}
+        have = {tuple(m) for m in sheet["menus"]}
+        write = [m for m in payload["menus"] if tuple(m) not in have]
+        dup = [m for m in payload["menus"] if tuple(m) in have]
+        start = 8 + len(sheet["menus"])
+        if not payload["dryRun"]:
+            sheet["menus"] += write
+        rng = f"{diag.L(start)}13:{diag.L(start + len(write) - 1)}15" if write else ""
+        return {"ok": True, "start": start, "cell": f"{diag.L(start)}13", "range": rng, "existing": len(have),
+                "write": write, "duplicates": dup, "overflow": [], "written": 0 if payload["dryRun"] else len(write)}
+
+    monkeypatch.setattr(gsheet, "load_config", lambda: {"url": "https://script.google.com/macros/s/x/exec", "token": "k"})
+    monkeypatch.setattr(gsheet.Client, "call", call)
+    run(monkeypatch, tmp_path, ["", "05", "", "1", "n", "", "", "", ""])
+    assert ("fill", True) in calls and ("fill", False) in calls
+    assert any(m[0] == "고객센터" for m in sheet["menus"]) and sheet["menus"][0] == ["기존 메뉴", "", ""]
+    assert not list(tmp_path.glob("*_메뉴입력_*.xlsx"))           # no Excel copy in Google mode

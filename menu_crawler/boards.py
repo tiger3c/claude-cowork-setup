@@ -52,7 +52,12 @@ class SheetsBoard:
         self.client, self.title = client, title
         self.label = f"구글 시트 자동 입력 · {title}" if title else "구글 시트 자동 입력"
 
+    cached = None
+
     def targets(self):
+        if self.cached is not None:          # read once when the board was chosen; fills re-read the live sheet
+            items, self.cached = self.cached, None
+            return items
         self.title, items = self.client.targets()
         self.label = f"구글 시트 자동 입력 · {self.title}"
         return items

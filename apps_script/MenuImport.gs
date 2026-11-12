@@ -18,7 +18,7 @@ var LAST_COL = 257;     // IW
 var MENU_ROW = 13;      // 13~15행
 var RESULT_ROW = 20;    // 20~67행
 var RESULT_COUNT = 48;
-var SITE_SHEET = /^\d\d_/;
+var SITE_SHEET = /^\d{2,3}_/;
 
 function setup() {
   var props = PropertiesService.getScriptProperties();
@@ -70,7 +70,7 @@ function listTargets(ss) {
   var out = [];
   ss.getSheets().forEach(function (sh) {
     var name = sh.getName();
-    if (!SITE_SHEET.test(name) || name === '00_Sample') return;
+    if (!SITE_SHEET.test(name) || name.toLowerCase() === '00_sample' || sh.isSheetHidden()) return;
     var head = sh.getRange('D3:D6').getDisplayValues();
     var area = readArea(sh);
     var info = planFill(area.menus, area.results, []);

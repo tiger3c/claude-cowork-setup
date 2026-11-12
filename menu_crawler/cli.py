@@ -456,9 +456,9 @@ def ask_path(prompt):
         value = ask(prompt).strip().strip('"').strip("'")
         if not value:
             return ""
-        if Path(value).is_file() and value.lower().endswith(".xlsx"):
+        if Path(value).is_file() and value.lower().endswith((".xlsx", ".xlsm")):
             return value
-        print("  .xlsx 파일 경로를 확인하세요. (파일을 이 창으로 끌어다 놓아도 됩니다)")
+        print("  .xlsx 또는 .xlsm 파일 경로를 확인하세요. (파일을 이 창으로 끌어다 놓아도 됩니다)")
 
 
 def workbook_step(menus, args, interactive):
@@ -498,7 +498,7 @@ def workbook_step(menus, args, interactive):
         print("  입력할 새 메뉴가 없습니다.")
         return None
     src = Path(path)
-    dst = Path(args.workbook_out) if args.workbook_out else src.with_name(f"{src.stem}_메뉴입력_{datetime.now():%Y%m%d_%H%M%S}.xlsx")
+    dst = Path(args.workbook_out) if args.workbook_out else src.with_name(f"{src.stem}_메뉴입력_{datetime.now():%Y%m%d_%H%M%S}{src.suffix}")
     if interactive and not ask_yes(f"  '{dst.name}' 파일로 저장할까요? (원본은 그대로 둡니다)", True):
         print("  취소했습니다.")
         return None
@@ -530,7 +530,10 @@ def main(argv=None):
             pass
     args = parse_args(argv)
     if args.from_result:
-        menus = diag.menus_from_result(args.from_result)
+        try:
+            menus = diag.menus_from_result(args.from_result)
+        except (ValueError, OSError) as exc:
+            sys.exit(f"수집 결과 파일을 읽을 수 없습니다: {exc}")
         title("수집 결과 → 진단 시트 입력")
         print(f"  수집 결과에서 메뉴 {len(menus)}개를 읽었습니다.")
         if not args.workbook:

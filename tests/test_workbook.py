@@ -84,3 +84,16 @@ def test_cli_from_result_into_diagnosis_sheet(tmp_path):
     ws = load_workbook(out)["02_빈시트"]
     assert [ws.cell(13, c).value for c in range(8, 11)] == ["조회", "이체", "고객센터"]
     assert ws["J15"].value == "목록"
+
+
+def test_control_characters_xlsm_and_wrong_result_file(tmp_path):
+    book = diagnosis_book(tmp_path / "diag.xlsx")
+    p = diag.plan(book, "01_테스트", [["메뉴\x0b이름\x1f", "하위\x00메뉴"]])
+    out = diag.write(book, tmp_path / "out.xlsx", p)
+    ws = load_workbook(out)["01_테스트"]
+    assert (ws["J13"].value, ws["J14"].value) == ("메뉴 이름", "하위 메뉴")
+    xlsm = tmp_path / "diag.xlsm"
+    xlsm.write_bytes(book.read_bytes())
+    assert diag.write(xlsm, tmp_path / "out.xlsm", diag.plan(xlsm, "02_빈시트", [["조회"]])).suffix == ".xlsm"
+    with pytest.raises(ValueError):
+        diag.menus_from_result(book)             # a diagnosis workbook is not a crawl result

@@ -92,8 +92,12 @@ class Workbook:
         return v.text
 
 
+CONTROL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ud800-\udfff\ufffe\uffff]")
+
+
 def clean(text):
-    return " ".join(str(text or "").split())[:240]
+    """One line, at most 240 characters, and only characters an xlsx file can hold."""
+    return " ".join(CONTROL.sub(" ", str(text or "")).split())[:240]
 
 
 def plan(path, sheet, menus):
@@ -206,11 +210,22 @@ def write(src, dst, p: Plan):
                     zout.writestr(item, zin.read(item.filename))
         if "xl/calcChain.xml" in wb.names:
             _drop_calc_chain(tmp_path)
+        _verify(tmp_path, p)
         shutil.move(str(tmp_path), dst)
     finally:
         if tmp_path.exists():
             tmp_path.unlink()
     return dst
+
+
+def _verify(path, p):
+    """Re-open the written file and check every planned cell; refuse to keep a file that differs."""
+    wb = Workbook(path)
+    grid = wb.grid(p.sheet)
+    for col, depths in p.to_write:
+        for r, text in zip(MENU_ROWS, depths):
+            if clean(grid.get((col, r), "")) != text:
+                raise RuntimeError(f"저장 검증 실패: {L(col)}{r}에 '{text}'가 기록되지 않았습니다. 파일을 만들지 않았습니다.")
 
 
 def _drop_calc_chain(path):
@@ -229,6 +244,9 @@ def menus_from_result(path):
     """Menus from a crawl result file made by this tool (진단메뉴_NN sheets, H13:..15)."""
     from openpyxl import load_workbook
     wb = load_workbook(path, read_only=True, data_only=True)
+    if not any(n.startswith("진단메뉴_") for n in wb.sheetnames):
+        wb.close()
+        raise ValueError("이 도구가 만든 수집 결과 엑셀이 아닙니다. (진단메뉴_ 시트가 없습니다)")
     out = []
     for name in sorted(n for n in wb.sheetnames if n.startswith("진단메뉴_")):
         ws = wb[name]

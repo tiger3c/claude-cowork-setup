@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 from pydantic import ValidationError
 
 from .crawler import Job
+from . import workbook as diag
 from .export import make_workbook, select_menus
 from .models import MODES, CrawlConfig
 
@@ -443,7 +444,71 @@ def parse_args(argv=None):
     p.add_argument("--headless", action="store_true", help="브라우저 창 없이 실행 (로그인 전 수집만)")
     p.add_argument("-y", "--yes", action="store_true", help="확인 질문 없이 바로 실행 (점검 권한 확인 완료로 간주)")
     p.add_argument("--no-open", action="store_true", help="저장 후 엑셀을 자동으로 열지 않음")
+    p.add_argument("--workbook", default="", help="메뉴를 입력할 진단 엑셀(.xlsx) 경로")
+    p.add_argument("--sheet", default="", help="메뉴를 입력할 진단 시트 이름 (예: 06_SIMAS)")
+    p.add_argument("--workbook-out", default="", help="메뉴를 입력한 진단 엑셀을 저장할 경로 (기본: 원본 옆에 새 파일)")
+    p.add_argument("--from-result", default="", help="크롤링 없이, 이전에 만든 수집 결과 엑셀의 메뉴를 진단 엑셀에 입력")
     return p.parse_args(argv)
+
+
+def ask_path(prompt):
+    while True:
+        value = ask(prompt).strip().strip('"').strip("'")
+        if not value:
+            return ""
+        if Path(value).is_file() and value.lower().endswith(".xlsx"):
+            return value
+        print("  .xlsx 파일 경로를 확인하세요. (파일을 이 창으로 끌어다 놓아도 됩니다)")
+
+
+def workbook_step(menus, args, interactive):
+    """Put the menus into a diagnosis sheet of the diagnosis workbook."""
+    path = args.workbook
+    if not path:
+        if not interactive or not ask_yes("진단 엑셀의 진단 시트에 메뉴를 바로 입력할까요?", False):
+            return None
+        path = ask_path("  진단 엑셀(.xlsx) 경로")
+        if not path:
+            return None
+    book = diag.Workbook(path)
+    sheets = book.site_sheets()
+    sheet = args.sheet
+    if not sheet:
+        if not interactive:
+            sys.exit("--sheet 로 진단 시트 이름을 지정하세요. 예: --sheet 06_SIMAS")
+        print()
+        for i, name in enumerate(sheets, 1):
+            print(f"  {i:2}) {name}")
+        while True:
+            pick = ask("  메뉴를 넣을 진단 시트 번호")
+            if pick.isdigit() and 1 <= int(pick) <= len(sheets):
+                sheet = sheets[int(pick) - 1]
+                break
+            print("  목록의 번호를 입력하세요.")
+    if sheet not in book.sheets:
+        sys.exit(f"진단 엑셀에 '{sheet}' 시트가 없습니다.")
+    p = diag.plan(path, sheet, menus)
+    title(f"진단 시트 입력 · {sheet}")
+    print(f"  시트에 이미 있는 메뉴 {p.existing}개 · 비어 있는 열 {len(p.free_columns)}개")
+    print(f"  새로 입력 {len(p.to_write)}개 · 이미 있는 메뉴라 건너뜀 {len(p.duplicates)}개 · 칸 부족 {len(p.overflow)}개")
+    if p.to_write:
+        first, last = p.to_write[0][0], p.to_write[-1][0]
+        print(f"  입력 위치: {diag.L(first)}13 ~ {diag.L(last)}15 (결과 칸 20~67행과 기존 메뉴 열은 건드리지 않습니다)")
+    if not p.to_write:
+        print("  입력할 새 메뉴가 없습니다.")
+        return None
+    src = Path(path)
+    dst = Path(args.workbook_out) if args.workbook_out else src.with_name(f"{src.stem}_메뉴입력_{datetime.now():%Y%m%d_%H%M%S}.xlsx")
+    if interactive and not ask_yes(f"  '{dst.name}' 파일로 저장할까요? (원본은 그대로 둡니다)", True):
+        print("  취소했습니다.")
+        return None
+    out = diag.write(src, dst, p)
+    print(f"  ✔ 저장: {out.resolve()}")
+    if p.overflow:
+        left = out.with_name(out.stem + "_미입력메뉴.tsv")
+        left.write_text("\n".join("\t".join(d) for d in p.overflow) + "\n", encoding="utf-8")
+        print(f"  ※ 칸이 부족해 넣지 못한 메뉴 {len(p.overflow)}개: {left.resolve()}")
+    return out
 
 
 def finish(data, args):
@@ -452,6 +517,7 @@ def finish(data, args):
     print()
     print(f"  엑셀 저장: {path}")
     google_sheet_step(data, path, not args.yes)
+    workbook_step([m["depths"] for m in select_menus(data)], args, not args.yes)
     if os.name == "nt" and not args.no_open and not args.yes and ask_yes("전체 메뉴 엑셀 파일을 열까요?", False):
         os.startfile(path)  # noqa: S606 - Windows only, local result file
 
@@ -463,6 +529,16 @@ def main(argv=None):
         except (AttributeError, ValueError):
             pass
     args = parse_args(argv)
+    if args.from_result:
+        menus = diag.menus_from_result(args.from_result)
+        title("수집 결과 → 진단 시트 입력")
+        print(f"  수집 결과에서 메뉴 {len(menus)}개를 읽었습니다.")
+        if not args.workbook:
+            args.workbook = ask_path("  진단 엑셀(.xlsx) 경로") if not args.yes else ""
+            if not args.workbook:
+                sys.exit("--workbook 으로 진단 엑셀 경로를 지정하세요.")
+        workbook_step(menus, args, not args.yes)
+        return
     config = build_config(args)
 
     title(MODES[config.mode])

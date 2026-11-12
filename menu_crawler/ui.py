@@ -171,7 +171,9 @@ def fail(text):
 def ask(prompt, default=""):
     suffix = f" [{default}]" if default else ""
     try:
-        value = input(f"{prompt}{suffix}: ").strip()
+        # input() writes its prompt straight to the console (not through sys.stdout) on Windows.
+        text = f"{prompt}{suffix}: "
+        value = input(plain(text) if isinstance(sys.stdout, ConsoleText) else text).strip()
     except EOFError:
         value = ""
     return value or default

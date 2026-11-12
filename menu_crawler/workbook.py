@@ -444,7 +444,7 @@ def domains(value):
     text = re.sub(r"예\).*", " ", str(value or ""))          # '예) https://...' is the form's hint, not an address
     for token in re.split(r"[\s,;，]+", CONTROL.sub(" ", text)):
         token = token.strip("()[]<>'\"")
-        if not token or token.startswith("예)") or token == "=formula" or "." not in token:
+        if not token or token == "=formula" or ("." not in token and not re.match(r"(https?://)?localhost\b", token, re.I)):
             continue
         url = token if "://" in token else "https://" + token
         if _host_path(url)[0] and url not in out:

@@ -7,6 +7,7 @@ import argparse
 import getpass
 import ctypes
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -64,10 +65,14 @@ def ask_url(initial, prompt="수집할 사이트 주소 (예: https://www.exampl
         if url and "://" not in url:
             url = "https://" + url
         try:
-            return CrawlConfig(url=url).url
+            value = CrawlConfig(url=url).url
+            host = urlsplit(value).hostname or ""
+            if "." in host or host == "localhost" or ":" in host:
+                return value
         except ValidationError:
-            print("  http:// 또는 https://로 시작하는 주소를 입력하세요.")
-            url = ""
+            pass
+        print("  주소 형식이 아닙니다. 예: www.example.com 또는 https://www.example.com")
+        url = ""
 
 
 def ask_mode(initial, default="1"):
@@ -678,34 +683,15 @@ def campaign(args):
     if board is None:
         return single_run(args)
     items = load_targets(board)
-    linked = sum(1 for t in items if t.domain)
-    ui.step(2, 3, "점검 주소")
-    print("  점검할 주소를 입력하면 진단 시트의 대표 도메인(D6)과 비교해 기입할 시트를 찾습니다.")
-    print("  " + ui.dim(f"대표 도메인이 적힌 시트 {linked}개 / {len(items)}개 | 여러 곳은 차례로 입력 | 다 입력했으면 빈 칸에서 Enter"))
-    plan = []
-    while True:
-        print()
-        raw = ask(f"  점검 주소 {len(plan) + 1}")
-        if not raw:
-            if plan:
-                break
-            print("  점검 주소를 하나 이상 입력하세요.")
-            continue
-        url = ask_url(raw)
-        target = choose_targets(board, args, True, url=url, items=items)[0]
-        if any(t.sheet and t.sheet == target.sheet for t, _, _ in plan):
-            ui.note(f"{target.sheet} 은(는) 이미 목록에 있습니다.")
-            continue
-        if board.can_save_domain and target.sheet and not target.d6 and not diag.match_url(url, [target]):
-            if ask_yes(f"  이 주소를 {target.sheet} 대표 도메인(D6)에 적어 둘까요? 다음부터 자동으로 찾습니다", True):
-                target.save_domain = url
-        plan.append((target, url, ""))
+    ui.step(2, 3, "진단 대상")
+    plan = pick_plan(board, args, items)
     ui.step(3, 3, "수집 방식 (모든 대상 공통)")
     mode = ask_mode(args.mode, default="2")
     if mode != "public":
         print()
-        print("  로그인 페이지 주소가 따로 있으면 입력하세요. " + ui.dim("없으면 Enter: 점검 주소에서 직접 이동"))
-        plan = [(t, url, ask(f"    {t.sheet or '진단 시트'} 로그인 주소")) for t, url, _ in plan]
+        print("  " + ui.dim("로그인 페이지는 보통 점검 주소에서 바로 이동할 수 있습니다."))
+        if ask_yes("  점검 주소와 다른 로그인 페이지 주소를 따로 지정할 대상이 있나요?", False):
+            plan = [(t, url, ask(f"    {t.sheet or '진단 시트'} 로그인 주소 (없으면 Enter)")) for t, url, _ in plan]
     settings = {"max_pages": args.max_pages, "max_seconds": args.max_seconds, "max_hops": args.max_hops,
                 "wait_ms": args.wait_ms, "delay_ms": args.delay_ms}
     print()
@@ -715,8 +701,10 @@ def campaign(args):
         settings["delay_ms"] = ask_int("    페이지 간 간격(ms)", settings["delay_ms"], 0, 5000)
 
     ui.header("작업 순서 확인", board.label)
-    ui.table([("순서", 4), ("진단 시트", 30), ("점검 주소", 0)],
-             [[str(i), t.sheet or "진단 시트", url] for i, (t, url, _) in enumerate(plan, 1)])
+    ui.table([("순서", 4), ("진단 시트", 30), ("기존 메뉴", 9), ("점검 주소", 0)],
+             [[str(i), t.sheet or "진단 시트", str(t.menus) if t.menus else "-", url] for i, (t, url, _) in enumerate(plan, 1)])
+    if any(t.menus for t, _, _ in plan):
+        print("  " + ui.dim("기존 메뉴가 있는 시트는 이미 있는 메뉴를 건너뛰고 새 메뉴만 이어서 넣습니다."))
     print()
     print(f"  수집 방식: {MODES[mode]} | {limits(settings['max_pages'], settings['max_seconds'])}")
     print("  " + ui.dim("메뉴를 모두 확인하면 자동으로 끝납니다. 중간에 멈추려면 q (그때까지 결과는 저장)"))
@@ -739,10 +727,12 @@ def campaign(args):
 
     ui.header("작업 결과", board.label)
     if done:
-        ui.table([("진단 시트", 28), ("수집", 5), ("기입", 15), ("위치", 13), ("메뉴 목록 엑셀", 0)],
-                 [[f.target.sheet or "진단 시트", str(n), f.status + (f" {f.written}개" if f.written else ""), f.where or "-", name or "-"]
-                  for f, n, name in done])
+        ui.table([("진단 시트", 28), ("수집", 5), ("기입", 15), ("중복 제외", 9), ("위치", 13), ("메뉴 목록 엑셀", 0)],
+                 [[f.target.sheet or "진단 시트", str(n), f.status + (f" {f.written}개" if f.written else ""),
+                   str(f.duplicates) if f.duplicates else "-", f.where or "-", name or "-"] for f, n, name in done])
     print()
+    if isinstance(board, ExcelBoard) and board.current == board.src and done:
+        ui.ok("새로 기입한 메뉴가 없어 새 진단 엑셀을 만들지 않았습니다. 작업 엑셀은 그대로입니다.")
     if isinstance(board, ExcelBoard) and board.current != board.src:
         ui.ok(f"진단 엑셀: {board.out.resolve()}")
         ui.say(ui.dim("원본은 그대로 두었습니다. 확인 후 이 파일로 작업을 이어 가면 됩니다."))
@@ -750,6 +740,72 @@ def campaign(args):
             os.startfile(board.out)  # noqa: S606 - Windows only, local file the user just created
     if any(f.status == "붙여넣기 준비" for f, _, _ in done):
         print("  " + ui.dim("붙여넣기 파일과 입력 내역(.tsv)은 결과 폴더에 있습니다."))
+
+
+URLISH = re.compile(r"^(https?://)?[\w-]+(\.[\w-]+)+(:\d+)?(/\S*)?$", re.I)
+
+
+def pick_plan(board, args, items):
+    """Sheets by number/name/'전체' (their D6 addresses are used) and/or inspection URLs (mapped by D6).
+    -> [(target, url, login_url)] without duplicates; one entry per address."""
+    with_domain = [t for t in items if t.addresses]
+    if with_domain:
+        print(f"  대표 도메인(D6)이 적힌 시트 {len(with_domain)}개 " + ui.dim("(번호나 이름만 입력하면 D6 주소로 수집)"))
+        ui.grid([t.sheet for t in with_domain])
+    print()
+    print("  진단할 시트 번호나 이름, 또는 점검 주소를 입력하세요. 여러 개는 쉼표로 구분합니다.")
+    print("  " + ui.dim("예: 29-34, 36, 41 | 뉴욕 | 전체 (D6이 적힌 시트 모두) | https://... | ? = 전체 시트 목록"))
+    plan = []
+
+    def add(t, url):
+        if any(x.sheet == t.sheet and u == url for x, u, _ in plan):
+            ui.note(f"이미 넣은 대상이라 건너뜁니다: {t.sheet}  {url}")
+            return
+        again = any(x.sheet == t.sheet for x, _, _ in plan)
+        plan.append((t, url, ""))
+        print(f"    + {len(plan)}. {t.sheet or '진단 시트'}  {url}" + ui.dim("  (같은 시트에 이어서 기입)" if again else ""))
+
+    def ask_address(t):
+        raw = ask(f"    {t.sheet} 점검 주소 (D6이 비어 있음, 건너뛰려면 Enter)")
+        if not raw:
+            return ""
+        url = ask_url(raw)
+        if board.can_save_domain and ask_yes(f"    이 주소를 {t.sheet} 대표 도메인(D6)에 적어 둘까요? 다음부터 번호만으로 수집합니다", True):
+            t.save_domain = url
+        return url
+
+    while True:
+        raw = ask("  대상" if not plan else "  추가 대상 (다 입력했으면 Enter)")
+        if not raw:
+            if plan:
+                return plan
+            print("  대상을 하나 이상 입력하세요.")
+            continue
+        if raw.strip() in {"?", "？"}:
+            show_targets(items)
+            continue
+        for token in [x.strip() for x in re.split(r"[,，]", raw) if x.strip()]:
+            if URLISH.match(token) and not re.fullmatch(r"[\d\s~-]+", token):
+                url = ask_url(token)
+                t = choose_targets(board, args, True, url=url, items=items)[0]
+                if t.sheet and not t.d6 and board.can_save_domain and not diag.match_url(url, [t]):
+                    if ask_yes(f"    이 주소를 {t.sheet} 대표 도메인(D6)에 적어 둘까요? 다음부터 번호만으로 수집합니다", True):
+                        t.save_domain = url
+                add(t, url)
+                continue
+            try:
+                picked = with_domain if token in {"전체", "all", "*"} else diag.select_targets(token, items)
+            except ValueError as exc:
+                ui.fail(str(exc))
+                continue
+            if not picked:
+                ui.fail("대표 도메인(D6)이 적힌 시트가 없습니다. 시트 번호나 주소로 입력하세요.")
+            for t in picked:
+                urls = t.addresses or [u for u in [ask_address(t)] if u]
+                if len(urls) > 1:
+                    print("    " + ui.dim(f"{t.sheet}: D6 주소 {len(urls)}개를 차례로 수집해 같은 시트에 기입합니다."))
+                for url in urls:
+                    add(t, ask_url(url))
 
 
 def run_target(i, total, t, url, login_url, mode, settings, board, args):

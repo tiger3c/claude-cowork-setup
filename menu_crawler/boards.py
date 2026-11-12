@@ -63,6 +63,7 @@ class SheetsBoard:
             print(f"  시트에 있는 메뉴 {pre['existing']}개 · 새로 입력 {count}개 · 이미 있어 뺀 메뉴 {len(pre['duplicates'])}개"
                   + (f" · 칸 부족 {len(pre['overflow'])}개" if pre["overflow"] else ""))
             if not count:
+                ui.ok("새로 넣을 메뉴가 없습니다." + (" 수집한 메뉴가 모두 시트에 이미 있습니다." if pre["duplicates"] else ""))
                 return Filled(target, "새 메뉴 없음", duplicates=len(pre["duplicates"]), overflow=len(pre["overflow"]))
             print(f"  입력 위치: ‘{target.sheet}’ {pre['range']}  (값만 입력 · 서식·수식·결과 칸은 그대로)")
             _preview(pre["write"])
@@ -147,6 +148,10 @@ class ExcelBoard:
         print(f"  시트에 있는 메뉴 {p.existing}개 · 새로 입력 {len(p.to_write)}개 · 이미 있어 뺀 메뉴 {len(p.duplicates)}개"
               + (f" · 칸 부족 {len(p.overflow)}개" if p.overflow else ""))
         if not p.to_write:
+            ui.ok("새로 넣을 메뉴가 없습니다." + (" 수집한 메뉴가 모두 시트에 이미 있습니다." if p.duplicates else "")
+                  + (" 빈 열이 없어 넣지 못한 메뉴는 입력 내역에 남깁니다." if p.overflow else ""))
+            if p.overflow:
+                diag.receipt(p, Path(out_dir) / f"{_safe(target.sheet)}_칸부족_{datetime.now():%Y%m%d_%H%M%S}_입력내역.tsv")
             return Filled(target, "새 메뉴 없음", duplicates=len(p.duplicates), overflow=len(p.overflow))
         where = _range(p.to_write[0][0], p.to_write[-1][0])
         print(f"  입력 위치: ‘{target.sheet}’ {where}  (값만 입력 · 서식·수식·결과 칸은 그대로)")

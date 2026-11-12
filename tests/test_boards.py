@@ -117,3 +117,43 @@ def test_apps_script_planning_logic():
     script = Path(__file__).parent / "js" / "menu_import.test.js"
     out = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
     assert out.returncode == 0, out.stderr
+
+
+def test_several_addresses_in_one_d6_cell_and_hint_ignored(tmp_path):
+    path = book_with_domains(tmp_path / "d.xlsx")
+    wb = load_workbook(path)
+    wb["02_빈시트"]["D6"] = "dev.example.net/app\nm.example.net, 예) https://www.example.com"
+    wb.save(path)
+    items = diag.targets(path)
+    assert [t.sheet for t in diag.match_url("https://m.example.net/main", items)] == ["02_빈시트"]
+    assert [t.sheet for t in diag.match_url("http://dev.example.net/app/login.do", items)] == ["02_빈시트"]
+    assert diag.match_url("https://dev.example.net/other", items) == []
+
+
+def test_excel_board_writes_inspection_url_into_empty_d6_only(tmp_path):
+    board = ExcelBoard(book_with_domains(tmp_path / "작업.xlsx"), tmp_path / "out.xlsx")
+    items = {t.sheet: t for t in board.targets()}
+    empty, filled = items["02_빈시트"], items["03_다른사이트"]
+    assert empty.d6.startswith("예)") is True        # placeholder is not empty: keep it
+    empty.save_domain = filled.save_domain = "https://new.example.com/"
+    board.fill(empty, [["가"]], False, tmp_path)
+    board.fill(filled, [["나"]], False, tmp_path)
+    wb = load_workbook(board.out)
+    assert wb["02_빈시트"]["D6"].value.startswith("예)")
+    assert wb["03_다른사이트"]["D6"].value == "https://other.example.org"
+    wb2 = load_workbook(tmp_path / "작업.xlsx")
+    wb2["02_빈시트"]["D6"] = None
+    wb2.save(tmp_path / "작업2.xlsx")
+    board2 = ExcelBoard(tmp_path / "작업2.xlsx", tmp_path / "out2.xlsx")
+    t = {x.sheet: x for x in board2.targets()}["02_빈시트"]
+    t.save_domain = "https://new.example.com/"
+    board2.fill(t, [["다"]], False, tmp_path)
+    assert load_workbook(board2.out)["02_빈시트"]["D6"].value == "https://new.example.com/"
+
+
+def test_console_text_has_no_ambiguous_symbols():
+    from menu_crawler import ui
+    text = ui.plain("메뉴 3개 · 방문 2개 → ‘29’ ※ ★ └ ■ ▶ …")
+    import unicodedata
+    assert not [c for c in text if ord(c) > 127 and unicodedata.east_asian_width(c) == "A"]
+    assert ui.width(ui.fit("가나다라마바사", 9)) == 9

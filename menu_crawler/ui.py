@@ -55,64 +55,115 @@ def accent(t):
     return paint(t, "36")
 
 
+# Korean Windows consoles (UTF-8 code page) keep one cell for "ambiguous" symbols but the font draws
+# them two cells wide, so they overlap the next character. plain() replaces them before they reach
+# the console; the width math below then only has to count Korean (wide) characters as two.
+WIDE = "WFA" if os.environ.get("MENU_CRAWLER_WIDE_AMBIGUOUS") else "WF"
+PLAIN = {"·": "/", "→": "->", "←": "<-", "‘": "'", "’": "'", "“": '"', "”": '"', "…": "...", "※": "*",
+         "⚠": "!", "★": "*", "☆": "*", "■": "#", "□": "-", "▶": ">", "▷": ">", "└": "+", "├": "+", "─": "-",
+         "━": "=", "│": "|", "×": "x", "°": "", "±": "+-", "✔": "v", "✖": "x", "•": "-", "º": "", "§": "S"}
+_PLAIN_TABLE = str.maketrans({k: v for k, v in PLAIN.items()})
+
+
+def plain(text):
+    """Console-safe text: spaced middle dots become ' | ', other ambiguous symbols ASCII."""
+    return str(text).replace(" · ", " | ").translate(_PLAIN_TABLE)
+
+
+class ConsoleText:
+    """stdout wrapper that writes plain() text; everything else is delegated."""
+
+    def __init__(self, raw):
+        self.raw = raw
+
+    def write(self, text):
+        return self.raw.write(plain(text))
+
+    def __getattr__(self, name):
+        return getattr(self.raw, name)
+
+
+def install_console():
+    if (os.name == "nt" or os.environ.get("MENU_CRAWLER_ASCII")) and not isinstance(sys.stdout, ConsoleText):
+        sys.stdout = ConsoleText(sys.stdout)
+
+
 def width(text):
-    return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in str(text))
+    text = plain(text) if os.name == "nt" else str(text)
+    return sum(2 if unicodedata.east_asian_width(ch) in WIDE else 0 if unicodedata.combining(ch) else 1 for ch in str(text))
 
 
 def fit(text, size):
-    """Cut/pad to a display width (Korean characters take two cells)."""
-    text, out, used = str(text), "", 0
-    for ch in text:
+    """Cut/pad to a display width so a line never wraps (Korean characters take two cells)."""
+    out, used = "", 0
+    for ch in str(text):
         w = width(ch)
         if used + w > size:
-            out = out[:-1] + "…" if out and size > 1 else out
-            used = width(out)
+            while out and used + 2 > size:       # room for ".."
+                used -= width(out[-1])
+                out = out[:-1]
+            out, used = out + "..", used + 2
             break
         out, used = out + ch, used + w
     return out + " " * max(0, size - used)
 
 
 def screen():
-    return max(60, min(110, shutil.get_terminal_size((100, 20)).columns - 1))
+    """Usable line width: one less than the console so the cursor never wraps."""
+    return max(40, min(100, shutil.get_terminal_size((100, 20)).columns - 1))
 
 
 def header(text, sub=""):
     w = screen()
     print()
-    print(accent("━" * w))
-    print("  " + bold(text) + (dim("   " + sub) if sub else ""))
-    print(accent("━" * w))
+    print(accent("=" * w))
+    print(fit("  " + text, w).rstrip() if not sub else "  " + bold(text) + dim(fit("   " + sub, max(0, w - 2 - width(text))).rstrip()))
+    print(accent("=" * w))
 
 
 def step(no, total, text):
     print()
     print(accent(f"  [{no}/{total}] ") + bold(text))
+    print(dim("  " + "-" * (screen() - 2)))
 
 
 def rule():
-    print(dim("  " + "─" * (screen() - 2)))
+    print(dim("  " + "-" * (screen() - 2)))
+
+
+def say(text, indent="  "):
+    """Print one line cut to the console width."""
+    print(fit(indent + str(text), screen()).rstrip())
 
 
 def table(columns, rows, indent="  "):
-    """columns: [(title, width)]; rows: lists of cell text. The last column takes the rest of the line."""
+    """columns: [(title, width)]; rows: lists of cell text. A last width of 0 takes the rest of the line."""
     widths = [w for _, w in columns]
-    rest = max(10, screen() - len(indent) - sum(widths[:-1]) - 2 * (len(widths) - 1))
+    rest = max(8, screen() - width(indent) - sum(widths[:-1]) - 2 * (len(widths) - 1))
     widths[-1] = min(widths[-1], rest) if widths[-1] else rest
-    print(indent + dim("  ".join(fit(t, w) for (t, _), w in zip(columns, widths))))
+    print(indent + dim("  ".join(fit(t, w) for (t, _), w in zip(columns, widths)).rstrip()))
     for row in rows:
         print(indent + "  ".join(fit(c, w) for c, w in zip(row, widths)).rstrip())
 
 
+def grid(cells, indent="    ", min_width=26):
+    """Short items in as many columns as fit the console."""
+    size = max(min_width, max((width(c) for c in cells), default=0) + 2)
+    per = max(1, (screen() - width(indent)) // size)
+    for i in range(0, len(cells), per):
+        print(indent + "".join(fit(c, size) for c in cells[i:i + per]).rstrip())
+
+
 def ok(text):
-    print("  " + good("✔ ") + text)
+    print("  " + good("[완료] ") + text)
 
 
 def note(text):
-    print("  " + warn("※ ") + text)
+    print("  " + warn("[참고] ") + text)
 
 
 def fail(text):
-    print("  " + bad("✖ ") + text)
+    print("  " + bad("[확인] ") + text)
 
 
 # ---------- 질문 ----------

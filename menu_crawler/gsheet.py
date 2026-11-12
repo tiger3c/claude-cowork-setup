@@ -67,9 +67,9 @@ class Client:
     def targets(self):
         data = self.call("targets")
         return data["title"], [diag.Target(t["sheet"], t.get("name") or "", diag._domain(t.get("domain", "")),
-                                           int(t.get("menus", 0)), int(t.get("start", diag.FIRST_COL)))
+                                           int(t.get("menus", 0)), int(t.get("start", diag.FIRST_COL)), diag.clean(t.get("domain", "")))
                                for t in data["targets"]]
 
-    def fill(self, sheet, menus, dry_run=False):
+    def fill(self, sheet, menus, dry_run=False, domain=""):
         rows = [[diag.clean(x) for x in (list(m) + ["", "", ""])[:3]] for m in menus]
-        return self.call("fill", sheet=sheet, menus=[r for r in rows if r[0]], dryRun=dry_run)
+        return self.call("fill", sheet=sheet, menus=[r for r in rows if r[0]], dryRun=dry_run, domain=diag.clean(domain))

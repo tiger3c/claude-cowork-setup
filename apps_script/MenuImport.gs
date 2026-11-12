@@ -102,6 +102,11 @@ function fillSheet(ss, req) {
         for (var i = 0; i < 3; i++) rows[i].push(m[i] ? "'" + m[i] : '');   // ' = 글자로 입력 (수식·날짜로 바뀌지 않음)
       });
       sh.getRange(MENU_ROW, p.start, 3, p.write.length).setValues(rows);   // 값만 입력, 서식은 그대로
+      var d6 = sh.getRange('D6');
+      if (req.domain && cleanText(d6.getValue()) === '') {                 // 비어 있을 때만 대표 도메인 기록
+        d6.setValue("'" + cleanText(req.domain));
+        p.domainSaved = true;
+      }
       SpreadsheetApp.flush();
     }
     p.written = req.dryRun ? 0 : p.write.length;

@@ -33,7 +33,7 @@ def _range(first, last):
 
 def _preview(menus, limit=5):
     for depths in menus[:limit]:
-        print("    " + ui.dim("· ") + " > ".join(d for d in depths if d))
+        print("    - " + " > ".join(d for d in depths if d))
     if len(menus) > limit:
         print("    " + ui.dim(f"… 외 {len(menus) - limit}개"))
 
@@ -45,6 +45,7 @@ def _safe(name):
 class SheetsBoard:
     kind = "gsheet"
     listed = False
+    can_save_domain = True
 
     def __init__(self, client, title=""):
         self.client, self.title = client, title
@@ -67,11 +68,12 @@ class SheetsBoard:
             _preview(pre["write"])
             if interactive and not ui.ask_yes("  구글 시트에 바로 입력할까요?", True):
                 return Filled(target, "건너뜀")
-            res = self.client.fill(target.sheet, menus)
+            res = self.client.fill(target.sheet, menus, domain=target.save_domain)
         except SheetError as exc:
             ui.fail(str(exc))
             return Filled(target, "실패")
-        ui.ok(f"구글 시트 ‘{target.sheet}’ {res['range']}에 {res['written']}개 입력했습니다.")
+        ui.ok(f"구글 시트 ‘{target.sheet}’ {res['range']}에 {res['written']}개 입력했습니다."
+              + (" 대표 도메인(D6)도 적었습니다." if res.get("domainSaved") else ""))
         record = diag.Plan(target.sheet, [], res["existing"], list(zip(range(res["start"], res["start"] + res["written"]), res["write"])),
                            res["duplicates"], res["overflow"])
         rec = diag.receipt(record, Path(out_dir) / f"구글시트입력_{_safe(target.sheet)}_{datetime.now():%Y%m%d_%H%M%S}_입력내역.tsv")
@@ -81,6 +83,7 @@ class SheetsBoard:
 class PasteBoard:
     kind = "google"
     listed = False
+    can_save_domain = False
 
     def __init__(self, snapshot="", copy=None):
         self.snapshot, self.copy = snapshot, copy
@@ -125,6 +128,7 @@ class PasteBoard:
 class ExcelBoard:
     kind = "excel"
     listed = False
+    can_save_domain = True
 
     def __init__(self, path, out=""):
         self.src = Path(path)
@@ -137,6 +141,9 @@ class ExcelBoard:
 
     def fill(self, target, menus, interactive, out_dir):
         p = diag.plan(self.current, target.sheet, menus)
+        domain = target.save_domain
+        if domain and not diag.cell_values(self.current, target.sheet, {"D6"}).get("D6"):
+            p.cells["D6"] = domain
         print(f"  시트에 있는 메뉴 {p.existing}개 · 새로 입력 {len(p.to_write)}개 · 이미 있어 뺀 메뉴 {len(p.duplicates)}개"
               + (f" · 칸 부족 {len(p.overflow)}개" if p.overflow else ""))
         if not p.to_write:
@@ -156,5 +163,5 @@ class ExcelBoard:
             return Filled(target, "실패")
         self.current = self.out
         diag.receipt(p, self.out.with_name(f"{self.out.stem}_{_safe(target.sheet)}_입력내역.tsv"))
-        ui.ok(f"‘{target.sheet}’ {where}에 {len(p.to_write)}개 입력했습니다. → {self.out.name}")
+        ui.ok(f"‘{target.sheet}’ {where}에 {len(p.to_write)}개 입력했습니다." + (" 대표 도메인(D6)도 적었습니다." if p.cells else ""))
         return Filled(target, "입력 완료", where, len(p.to_write), len(p.duplicates), len(p.overflow), str(self.out.resolve()))

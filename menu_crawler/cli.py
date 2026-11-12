@@ -68,11 +68,11 @@ def ask_mode(initial, default="1"):
     if initial:
         return initial
     print()
-    print("수집 방식을 선택하세요.")
+    print("  수집 방식을 선택하세요.")
     for key, mode in MODE_KEYS.items():
-        print(f"  {key}) {MODES[mode]:<16} - {MODE_HELP[mode]}")
+        print(f"    {key}) {MODES[mode]:<16} - {MODE_HELP[mode]}")
     while True:
-        value = ask("번호", default)
+        value = ask("  번호", default)
         if value in MODE_KEYS:
             return MODE_KEYS[value]
         print("  1, 2, 3 중에서 선택하세요.")
@@ -159,9 +159,9 @@ def wait(job, quiet=False):
             if not quiet:
                 pages = f"{data['visited_count']}/{data['config']['max_pages']}"
                 current = data.get("current_url", "")
-                text = f"  [{pages}] 메뉴 {len(data['menus'])}개 · {current}"[:width]
+                text = ui.fit(f"  [{pages}] 메뉴 {len(data['menus'])}개 · {current}", width)
                 if text != last:
-                    print("\r" + text.ljust(width), end="", flush=True)
+                    print("\r" + text, end="", flush=True)
                     last = text
             time.sleep(0.4)
     except KeyboardInterrupt:
@@ -411,8 +411,8 @@ def choose_board(args, interactive):
         if not interactive:
             kind = "google"
         else:
-            print("  작업할 진단 엑셀 파일을 붙여넣어 주세요. " + ui.dim("(파일을 이 창에 끌어다 놓아도 됩니다)"))
-            print("  " + ui.dim("다른 방법: g = 구글 시트에 바로 입력 · p = 구글 시트 붙여넣기 · Enter = 기입 없이 수집만"))
+            print("  작업할 진단 엑셀 파일을 붙여넣어 주세요. (파일을 이 창에 끌어다 놓아도 됩니다)")
+            print("  " + ui.dim("g = 구글 시트에 바로 입력 | p = 구글 시트 붙여넣기 | Enter = 기입 없이 수집만"))
             while True:
                 value = ask("  작업 엑셀").strip().strip('"').strip("'").strip()
                 if value.lower() in {"g", "ㅎ"}:
@@ -460,14 +460,15 @@ def choose_board(args, interactive):
                 sys.exit(1)
             args.workbook = ""
             return choose_board(args, interactive)
-        ui.ok(f"{Path(path).name} · 진단 시트 {count}개를 찾았습니다. " + ui.dim(f"(기입 결과는 {board.out.name} 로 저장, 원본은 그대로)"))
+        ui.ok(f"{Path(path).name} | 진단 시트 {count}개")
+        ui.say(ui.dim(f"기입 결과는 새 파일 {board.out.name} 에 저장합니다. 원본은 그대로 둡니다."))
         return board
     return None
 
 
 def show_targets(items):
-    rows = [[t.sheet, str(t.menus) if t.menus else "-", t.cell, t.domain or ""] for t in items]
-    ui.table([("진단 시트", 34), ("기존 메뉴", 9), ("입력 시작", 9), ("대표 도메인", 0)], rows, indent="    ")
+    print("  " + ui.dim("진단 시트 목록  (괄호 = 이미 입력된 메뉴 수)"))
+    ui.grid([t.sheet + (f" ({t.menus})" if t.menus else "") for t in items])
 
 
 def load_targets(board):
@@ -483,12 +484,12 @@ def map_url(url, items, interactive, query=""):
         return None, items
     found = diag.match_url(url, items)
     if len(found) == 1:
-        ui.ok(f"대표 도메인 일치 → {found[0].sheet}")
+        ui.ok(f"대표 도메인 일치: {found[0].sheet}")
         return found[0], items
     if found:
         ui.note("대표 도메인이 같은 진단 시트가 여러 개입니다. 하나를 고르세요.")
     else:
-        ui.note("대표 도메인(D6)이 일치하는 진단 시트가 없어 진단 대상을 지정합니다.")
+        ui.note("대표 도메인(D6)이 일치하는 진단 시트가 없습니다. 진단 대상을 입력하세요.")
     if not interactive:
         sys.exit("--sheet 로 진단 시트를 지정하세요. (진단 시트 D6에 대표 도메인을 적어 두면 자동으로 찾습니다)")
     return None, found or items
@@ -510,15 +511,20 @@ def choose_targets(board, args, interactive, many=False, url="", items=None):
     if interactive and not query and (pool is not items or not board.listed):
         show_targets(pool)     # the full list once per run; a narrowed list every time
         board.listed = board.listed or pool is items
-    example = "예: 사이트A, 사이트B" if many else "예: 사이트A"
     while True:
         if not query:
             if not interactive:
                 sys.exit("--sheet 로 진단 시트를 지정하세요. 예: --sheet 01_사이트A")
-            query = ask(f"  진단 대상 (시트 이름 일부만 써도 됩니다 · {'여러 개는 쉼표로 구분 · ' if many else ''}{example})")
+            query = ask(f"  진단 대상 (이름 일부만 써도 됨, {'여러 개는 쉼표, ' if many else ''}목록 다시 보기 ?)")
+            if query in {"?", "？"}:
+                show_targets(pool)
+                query = ""
+                continue
         try:
             picked = diag.select_targets(query, pool)
             if picked and (many or len(picked) == 1):
+                if not many and url:
+                    ui.ok(picked[0].sheet)
                 return picked
             ui.fail("이 단계에서는 진단 대상을 하나만 지정하세요.")
         except ValueError as exc:
@@ -590,7 +596,8 @@ def choose_menus(confirmed, unverified, args, interactive):
     """confirmed + (optionally) navigation menus that could not be confirmed, e.g. behind a login."""
     if not unverified:
         return confirmed
-    if not args.include_unverified and interactive:
+    if not args.include_unverified and interactive and not getattr(args, "unverified_asked", False):
+        args.unverified_asked = True
         from collections import Counter
         kinds = " · ".join(f"{k} {n}" for k, n in Counter(s for _, s in unverified).most_common())
         print()
@@ -657,18 +664,20 @@ def single_run(args):
 
 
 def campaign(args):
-    """진단표 → 진단 대상(여러 개) → 수집 방식 → 대상별 주소 → 대상마다 수집·결과 저장·기입 → 요약."""
-    ui.header("웹 메뉴 수집기", "수집 → 메뉴 목록 엑셀 → 진단표 기입")
+    """작업 엑셀 → 점검 주소(여러 개, 대표 도메인으로 시트 매핑) → 수집 방식 → 대상마다 수집·저장·기입 → 결과 표."""
+    ui.header("웹 메뉴 수집기", "수집 -> 메뉴 목록 엑셀 -> 진단 시트 기입")
     ui.step(1, 3, "작업할 진단 엑셀")
     board = choose_board(args, True)
     if board is None:
         return single_run(args)
     items = load_targets(board)
+    linked = sum(1 for t in items if t.domain)
     ui.step(2, 3, "점검 주소")
-    print("  점검할 주소를 하나씩 입력하세요. 진단 시트의 대표 도메인과 비교해 기입할 시트를 찾습니다.")
-    print("  " + ui.dim("다 입력했으면 빈 칸에서 Enter"))
+    print("  점검할 주소를 입력하면 진단 시트의 대표 도메인(D6)과 비교해 기입할 시트를 찾습니다.")
+    print("  " + ui.dim(f"대표 도메인이 적힌 시트 {linked}개 / {len(items)}개 | 여러 곳은 차례로 입력 | 다 입력했으면 빈 칸에서 Enter"))
     plan = []
     while True:
+        print()
         raw = ask(f"  점검 주소 {len(plan) + 1}")
         if not raw:
             if plan:
@@ -680,67 +689,87 @@ def campaign(args):
         if any(t.sheet and t.sheet == target.sheet for t, _, _ in plan):
             ui.note(f"{target.sheet} 은(는) 이미 목록에 있습니다.")
             continue
+        if board.can_save_domain and target.sheet and not target.d6 and not diag.match_url(url, [target]):
+            if ask_yes(f"  이 주소를 {target.sheet} 대표 도메인(D6)에 적어 둘까요? 다음부터 자동으로 찾습니다", True):
+                target.save_domain = url
         plan.append((target, url, ""))
-        print("  " + ui.dim(f"→ {len(plan)}번: {target.sheet or '진단 시트'}  {url}"))
     ui.step(3, 3, "수집 방식 (모든 대상 공통)")
     mode = ask_mode(args.mode, default="2")
     if mode != "public":
-        print("  " + ui.dim("로그인 페이지 주소가 따로 있으면 입력하세요. 없으면 Enter (점검 주소에서 직접 이동)"))
+        print()
+        print("  로그인 페이지 주소가 따로 있으면 입력하세요. " + ui.dim("없으면 Enter: 점검 주소에서 직접 이동"))
         plan = [(t, url, ask(f"    {t.sheet or '진단 시트'} 로그인 주소")) for t, url, _ in plan]
     settings = {"max_pages": args.max_pages, "max_seconds": args.max_seconds, "max_hops": args.max_hops,
                 "wait_ms": args.wait_ms, "delay_ms": args.delay_ms}
-    if ask_yes("  고급 설정(방문 페이지 수·시간·간격)을 바꿀까요?"):
+    print()
+    if ask_yes("  고급 설정(방문 페이지 수, 시간, 간격)을 바꿀까요?"):
         settings["max_pages"] = ask_int("    최대 방문 페이지 수", settings["max_pages"], 1, 2000)
         settings["max_seconds"] = ask_int("    대상별 최대 수집 시간(초)", settings["max_seconds"], 10, 7200)
         settings["delay_ms"] = ask_int("    페이지 간 간격(ms)", settings["delay_ms"], 0, 5000)
 
     ui.header("작업 순서 확인", board.label)
-    ui.table([("순서", 4), ("진단 시트", 34), ("점검 주소", 0)],
+    ui.table([("순서", 4), ("진단 시트", 30), ("점검 주소", 0)],
              [[str(i), t.sheet or "진단 시트", url] for i, (t, url, _) in enumerate(plan, 1)])
-    print(f"  수집 방식: {MODES[mode]} · 대상별 최대 {settings['max_pages']}페이지 / {settings['max_seconds']}초")
+    print()
+    print(f"  수집 방식: {MODES[mode]} | 대상별 최대 {settings['max_pages']}페이지, {settings['max_seconds']}초")
     if mode != "public":
-        print("  " + ui.dim("대상마다 브라우저 창이 열리면 직접 로그인한 뒤 Enter를 누릅니다."))
-    if not ask_yes("  모든 대상의 점검 권한(계약·승인)을 확인했고, 이대로 시작할까요?", True):
+        print("  " + ui.dim("대상마다 브라우저 창이 열리면 직접 로그인한 뒤 이 창에서 Enter를 누릅니다."))
+    if any(t.save_domain for t, _, _ in plan):
+        print("  " + ui.dim("대표 도메인(D6)이 비어 있는 시트는 점검 주소도 함께 적습니다."))
+    if not ask_yes("  모든 대상의 점검 권한(계약, 승인)을 확인했고, 이대로 시작할까요?", True):
         sys.exit("취소했습니다.")
 
     done = []
-    for i, (t, url, login_url) in enumerate(plan, 1):
-        ui.header(f"[{i}/{len(plan)}] {t.name or t.sheet}", f"{t.sheet} · {url}")
-        try:
-            config = CrawlConfig(url=url, mode=mode, site_name=(t.name or t.sheet or urlsplit(url).hostname or "메뉴 수집")[:120],
-                                 login_url=login_url, extra_hosts=args.extra_host, browser=args.browser,
-                                 menu_selector=args.selector, headless=args.headless and mode == "public", **settings)
-        except ValidationError as exc:
-            ui.fail("입력값 오류: " + "; ".join(e["msg"] for e in exc.errors()))
-            done.append((Filled(t, "실패"), 0, ""))
-            continue
-        data, _ = run_crawl(config, args)
-        if data is None:
-            ui.fail("수집한 메뉴가 없습니다.")
-            done.append((Filled(t, "수집 실패"), 0, ""))
-        else:
-            summary(data)
-            path = save(data, "")
-            print()
-            ui.ok(f"메뉴 목록 엑셀: {path}")
-            confirmed, unverified = diag.menus_from_report(data, include_unverified=True)
-            menus = choose_menus(confirmed, unverified, args, True)
-            print()
-            print("  " + ui.bold(f"▶ 진단표 기입 · {t.sheet or '진단 시트'}"))
-            done.append((board.fill(t, menus, True, path.parent), len(menus), path.name))
-        if i < len(plan):
-            nxt = plan[i][0]
-            if not ask_yes(f"  다음 대상 ‘{nxt.sheet or '진단 시트'}’ 수집을 시작할까요?", True):
+    try:
+        for i, (t, url, login_url) in enumerate(plan, 1):
+            done.append(run_target(i, len(plan), t, url, login_url, mode, settings, board, args))
+            if i < len(plan) and not ask_yes(f"  다음 대상 {plan[i][0].sheet or '진단 시트'} 수집을 시작할까요?", True):
                 break
+    except KeyboardInterrupt:
+        print()
+        ui.note("중단했습니다. 지금까지 끝난 대상만 정리합니다.")
 
     ui.header("작업 결과", board.label)
-    ui.table([("진단 시트", 28), ("수집", 5), ("기입", 15), ("위치", 13), ("메뉴 목록 엑셀", 0)],
-             [[f.target.sheet or "진단 시트", str(n), f.status + (f" {f.written}개" if f.written else ""), f.where or "-", name or "-"]
-              for f, n, name in done])
+    if done:
+        ui.table([("진단 시트", 28), ("수집", 5), ("기입", 15), ("위치", 13), ("메뉴 목록 엑셀", 0)],
+                 [[f.target.sheet or "진단 시트", str(n), f.status + (f" {f.written}개" if f.written else ""), f.where or "-", name or "-"]
+                  for f, n, name in done])
+    print()
     if isinstance(board, ExcelBoard) and board.current != board.src:
-        ui.ok(f"진단 엑셀: {board.out.resolve()}  " + ui.dim("(원본은 그대로)"))
+        ui.ok(f"진단 엑셀: {board.out.resolve()}")
+        ui.say(ui.dim("원본은 그대로 두었습니다. 확인 후 이 파일로 작업을 이어 가면 됩니다."))
+        if os.name == "nt" and not args.no_open and ask_yes("  진단 엑셀을 열까요?", True):
+            os.startfile(board.out)  # noqa: S606 - Windows only, local file the user just created
     if any(f.status == "붙여넣기 준비" for f, _, _ in done):
         print("  " + ui.dim("붙여넣기 파일과 입력 내역(.tsv)은 결과 폴더에 있습니다."))
+
+
+def run_target(i, total, t, url, login_url, mode, settings, board, args):
+    """One 진단 대상: crawl -> save the menu list -> fill the 진단 시트. -> (Filled, menus, result file name)."""
+    ui.header(f"[{i}/{total}] {t.name or t.sheet}", f"{t.sheet}  {url}")
+    try:
+        config = CrawlConfig(url=url, mode=mode, site_name=(t.name or t.sheet or urlsplit(url).hostname or "메뉴 수집")[:120],
+                             login_url=login_url, extra_hosts=args.extra_host, browser=args.browser,
+                             menu_selector=args.selector, headless=args.headless and mode == "public", **settings)
+    except ValidationError as exc:
+        ui.fail("입력값 오류: " + "; ".join(e["msg"] for e in exc.errors()))
+        return Filled(t, "실패"), 0, ""
+    data, error = run_crawl(config, args)
+    if data is None:
+        ui.fail("수집한 메뉴가 없습니다.")
+        return Filled(t, "수집 실패"), 0, ""
+    summary(data)
+    path = save(data, "")
+    print()
+    ui.ok(f"메뉴 목록 엑셀: {path.name}")
+    ui.say(ui.dim(str(path.parent)))
+    confirmed, unverified = diag.menus_from_report(data, include_unverified=True)
+    menus = choose_menus(confirmed, unverified, args, True)
+    if error is not None and not ask_yes(f"  수집이 중간에 멈췄습니다. 지금까지의 메뉴 {len(menus)}개를 진단 시트에 기입할까요?", False):
+        return Filled(t, "기입 안 함"), len(menus), path.name
+    print()
+    print("  " + ui.bold(f"> 진단 시트 기입: {t.sheet or '진단 시트'}"))
+    return board.fill(t, menus, True, path.parent), len(menus), path.name
 
 
 def main(argv=None):
@@ -750,6 +779,7 @@ def main(argv=None):
         except (AttributeError, ValueError):
             pass
     args = parse_args(argv)
+    ui.install_console()
     if args.connect_google:
         connect_google(True, force=True)
         return

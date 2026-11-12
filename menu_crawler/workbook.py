@@ -41,6 +41,7 @@ class Plan:
     to_write: list[tuple[int, list[str]]] = field(default_factory=list)
     duplicates: list[list[str]] = field(default_factory=list)
     overflow: list[list[str]] = field(default_factory=list)
+    cells: dict = field(default_factory=dict)      # e.g. {"D6": "https://..."}: only cells that are empty
 
 
 class Workbook:
@@ -189,7 +190,8 @@ def write(src, dst, p: Plan):
     rows = {int(r.get("r")): r for r in root.find(M + "sheetData")}
     sd = root.find(M + "sheetData")
     col_styles = _column_styles(root)
-    for r in MENU_ROWS:
+    extra_rows = sorted({int(REF.match(ref).group(2)) for ref in p.cells})
+    for r in (*MENU_ROWS, *extra_rows):
         if r not in rows:
             new = etree.Element(M + "row", r=str(r))
             after = [x for x in sd if int(x.get("r")) < r]
@@ -199,6 +201,8 @@ def write(src, dst, p: Plan):
         for r, text in zip(MENU_ROWS, depths):
             if text:
                 _set_text(rows[r], f"{L(col)}{r}", text, col_styles)
+    for ref, text in p.cells.items():
+        _set_text(rows[int(REF.match(ref).group(2))], ref, clean(text), col_styles)
     # Excel recalculates every formula when the file opens (menu paths and counts depend on these cells).
     calc = book.find(M + "calcPr")
     if calc is None:
@@ -242,6 +246,19 @@ def _verify(path, p):
         for r, text in zip(MENU_ROWS, depths):
             if clean(grid.get((col, r), "")) != text:
                 raise RuntimeError(f"저장 검증 실패: {L(col)}{r}에 '{text}'가 기록되지 않았습니다. 파일을 만들지 않았습니다.")
+    if p.cells:
+        got = cell_values(path, p.sheet, p.cells)
+        bad = [ref for ref, text in p.cells.items() if got.get(ref) != clean(text)]
+        if bad:
+            raise RuntimeError(f"저장 검증 실패: {', '.join(bad)}. 파일을 만들지 않았습니다.")
+
+
+def cell_values(path, sheet, refs):
+    """{ref: text} for a few cells of one sheet."""
+    wb = Workbook(path)
+    with zipfile.ZipFile(wb.path) as z:
+        root = etree.fromstring(z.read(wb.sheets[sheet]))
+    return {c.get("r"): clean(wb._value(c) or "") for c in root.iter(M + "c") if c.get("r") in refs}
 
 
 def _drop_calc_chain(path):
@@ -405,6 +422,12 @@ class Target:
     domain: str = ""
     menus: int = 0
     start: int = FIRST_COL        # first column after the last used one
+    d6: str = ""                  # 대표 도메인 cell as it is (empty -> can be filled in)
+    save_domain: str = ""         # inspection URL to write into an empty D6 together with the menus
+
+    @property
+    def addresses(self):
+        return domains(self.d6) or ([self.domain] if self.domain else [])
 
     @property
     def no(self):
@@ -415,11 +438,23 @@ class Target:
         return f"{L(self.start)}13" if self.start <= LAST_COL else "칸 없음"
 
 
+def domains(value):
+    """Every address in a 대표 도메인 cell: one or several, split by spaces, commas or line breaks."""
+    out = []
+    text = re.sub(r"예\).*", " ", str(value or ""))          # '예) https://...' is the form's hint, not an address
+    for token in re.split(r"[\s,;，]+", CONTROL.sub(" ", text)):
+        token = token.strip("()[]<>'\"")
+        if not token or token.startswith("예)") or token == "=formula" or "." not in token:
+            continue
+        url = token if "://" in token else "https://" + token
+        if _host_path(url)[0] and url not in out:
+            out.append(url)
+    return out
+
+
 def _domain(value):
-    value = clean(value)
-    if not value or value.startswith("예)") or value == "=formula" or " " in value or "." not in value:
-        return ""
-    return value if "://" in value else "https://" + value
+    found = domains(value)
+    return found[0] if found else ""
 
 
 def targets(path):
@@ -443,7 +478,8 @@ def targets(path):
             name = clean(head.get(3, ""))
             if not name or name == "=formula" or name.startswith("예)"):
                 name = sheet.split("_", 1)[-1]
-            out.append(Target(sheet, name, _domain(head.get(6, "")), len(menus), max(used) + 1 if used else FIRST_COL))
+            out.append(Target(sheet, name, _domain(head.get(6, "")), len(menus), max(used) + 1 if used else FIRST_COL,
+                              clean(head.get(6, ""))))
     return out
 
 
@@ -489,14 +525,16 @@ def match_url(url, items):
         return []
     scored = []
     for t in items:
-        if not t.domain:
-            continue
-        h, p = _host_path(t.domain)
-        if h != host:
-            continue
-        p = p.rsplit("/", 1)[0] if "." in p.rsplit("/", 1)[-1] else p   # /index.jsp -> site root
-        if path == p or path.startswith(p + "/") or not p:
-            scored.append((len(p), t))
+        best = -1
+        for address in t.addresses:
+            h, p = _host_path(address)
+            if h != host:
+                continue
+            p = p.rsplit("/", 1)[0] if "." in p.rsplit("/", 1)[-1] else p   # /index.jsp -> site root
+            if path == p or path.startswith(p + "/") or not p:
+                best = max(best, len(p))
+        if best >= 0:
+            scored.append((best, t))
     if not scored:
         return []
     best = max(n for n, _ in scored)

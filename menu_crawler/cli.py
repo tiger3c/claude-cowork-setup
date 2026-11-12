@@ -445,7 +445,7 @@ def parse_args(argv=None):
     p.add_argument("-y", "--yes", action="store_true", help="확인 질문 없이 바로 실행 (점검 권한 확인 완료로 간주)")
     p.add_argument("--no-open", action="store_true", help="저장 후 엑셀을 자동으로 열지 않음")
     p.add_argument("--workbook", default="", help="메뉴를 입력할 진단 엑셀(.xlsx) 경로")
-    p.add_argument("--sheet", default="", help="메뉴를 입력할 진단 시트 이름 (예: 06_SIMAS)")
+    p.add_argument("--sheet", default="", help="메뉴를 입력할 진단 시트 이름 (예: 01_사이트A)")
     p.add_argument("--workbook-out", default="", help="메뉴를 입력한 진단 엑셀을 저장할 경로 (기본: 원본 옆에 새 파일)")
     p.add_argument("--from-result", default="", help="크롤링 없이, 이전에 만든 수집 결과 엑셀의 메뉴를 진단 엑셀에 입력")
     return p.parse_args(argv)
@@ -475,7 +475,7 @@ def workbook_step(menus, args, interactive):
     sheet = args.sheet
     if not sheet:
         if not interactive:
-            sys.exit("--sheet 로 진단 시트 이름을 지정하세요. 예: --sheet 06_SIMAS")
+            sys.exit("--sheet 로 진단 시트 이름을 지정하세요. 예: --sheet 01_사이트A")
         print()
         for i, name in enumerate(sheets, 1):
             print(f"  {i:2}) {name}")

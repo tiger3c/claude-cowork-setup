@@ -22,7 +22,7 @@ from pydantic import ValidationError
 
 from .crawler import Job
 from . import workbook as diag
-from . import gsheet, ui
+from . import gsheet, netcheck, state, ui
 from .boards import ExcelBoard, Filled, PasteBoard, SheetsBoard
 from .gsheet import SheetError
 from .ui import ask, ask_int, ask_yes
@@ -200,43 +200,60 @@ def crawl(job, phase):
     return data
 
 
+class Account:
+    """Login used for this run only. The password, if the user agrees, is kept in memory until the program ends:
+    never in a file, an Excel or a log."""
+    username = ""
+    password = ""
+
+
 def login_step(job, config, username=None):
     title("로그인 단계")
     print("  1. 열린 브라우저 창에서 로그인하세요. 보안문자·OTP·추가 인증까지 마칩니다.")
     print("  2. 로그인된 화면이 보이면 여기서 Enter를 누르세요.")
     print("  ※ 아이디·비밀번호는 파일·엑셀·기록에 저장하지 않습니다.")
     print("  " + run_command(job, "goto", url=config.login_url or config.url)["message"])
-    if username is not None:
+    if username is not None and not Account.username:
+        Account.username = username
+    if Account.username and Account.password:
+        print("  " + ui.dim(f"앞 대상에서 쓴 계정({Account.username})을 입력란에 채웁니다. 로그인 버튼은 직접 누르세요."))
+        autofill(job, Account.username, Account.password)
+    elif username is not None:
         autofill(job, username)
     while True:
         print()
-        print("  [Enter] 로그인 완료 → 수집 시작")
-        print("  [a] 아이디·비밀번호 자동 입력 (로그인 버튼은 직접 누름)")
+        print("  [Enter] 로그인 완료 -> 수집 시작")
+        print("  [a] 아이디/비밀번호 자동 입력 (로그인 버튼은 직접 누름)")
         print("  [o] 로그인 화면 다시 열기")
         print("  [c] 지금 열린 화면의 메뉴만 추가")
         print("  [q] 로그인 없이 종료하고 지금까지 결과 저장")
-        choice = ask("선택").lower()
+        choice = ask("  선택").lower()
         if choice == "":
             return True
-        if choice == "a":
-            autofill(job, ask("  아이디"))
-        elif choice == "o":
+        if choice in {"a", "ㅁ"}:
+            Account.username = ask("  아이디", Account.username)
+            autofill(job, Account.username)
+        elif choice in {"o", "ㅐ"}:
             print("  " + run_command(job, "goto", url=config.login_url or config.url)["message"])
-        elif choice == "c":
+        elif choice in {"c", "ㅊ"}:
             job.command("capture", phase="after")
             print("  " + wait(job, quiet=True)["message"])
-        elif choice == "q":
+        elif choice in {"q", "ㅂ"}:
             return False
 
 
-def autofill(job, username):
-    password = getpass.getpass("  비밀번호 (입력 내용은 화면에 표시되지 않음): ")
+def autofill(job, username, password=None):
+    remembered = password is not None
+    if password is None:
+        password = getpass.getpass("  비밀번호 (입력 내용은 화면에 표시되지 않음): ")
     if not password:
         print("  비밀번호가 비어 있어 건너뜁니다.")
         return
     ticket = job.command("fill", username=username, password=password)
-    del password
     print("  " + job.wait_done(ticket)["message"])
+    if not remembered and ask_yes("  다음 대상에도 이 계정을 자동으로 채울까요? (이번 실행 동안 메모리에만 보관)", True):
+        Account.username, Account.password = username, password
+    del password
 
 
 def summary(data):
@@ -420,15 +437,20 @@ def choose_board(args, interactive):
         if not interactive:
             kind = "google"
         else:
+            last = state.last_workbook()
             print("  작업할 진단 엑셀 파일을 붙여넣어 주세요. (파일을 이 창에 끌어다 놓아도 됩니다)")
-            print("  " + ui.dim("g = 구글 시트에 바로 입력 | p = 구글 시트 붙여넣기 | Enter = 기입 없이 수집만"))
+            if last:
+                print("  " + ui.dim(f"Enter = 지난번 파일 {Path(last).name}"))
+            print("  " + ui.dim("g = 구글 시트에 바로 입력 | p = 구글 시트 붙여넣기 | " + ("- = 기입 없이 수집만" if last else "Enter = 기입 없이 수집만")))
             while True:
                 value = ask("  작업 엑셀").strip().strip('"').strip("'").strip()
+                if not value and last:
+                    value = last
                 if value.lower() in {"g", "ㅎ"}:
                     kind = "gsheet"
                 elif value.lower() in {"p", "ㅔ"}:
                     kind = "google"
-                elif not value:
+                elif not value or value == "-":
                     return None
                 elif Path(value).is_file() and value.lower().endswith((".xlsx", ".xlsm")):
                     kind, path = "excel", value
@@ -715,8 +737,13 @@ def campaign(args):
         settings["delay_ms"] = ask_int("    페이지 간 간격(ms)", settings["delay_ms"], 0, 5000)
 
     ui.header("작업 순서 확인", board.label)
-    ui.table([("순서", 4), ("진단 시트", 30), ("기존 메뉴", 9), ("점검 주소", 0)],
-             [[str(i), t.sheet or "진단 시트", str(t.menus) if t.menus else "-", url] for i, (t, url, _) in enumerate(plan, 1)])
+    print("  접속 확인 중...")
+    reach = netcheck.check_all([url for _, url, _ in plan])
+    ui.table([("순서", 4), ("진단 시트", 28), ("기존 메뉴", 9), ("접속", 18), ("점검 주소", 0)],
+             [[str(i), t.sheet or "진단 시트", str(t.menus) if t.menus else "-", ("" if ok else "! ") + text, url]
+              for i, ((t, url, _), (ok, text)) in enumerate(zip(plan, reach), 1)])
+    if not all(ok for ok, _ in reach):
+        ui.note("접속되지 않는 대상이 있습니다. VPN, 사내망, 주소를 확인하세요. 그대로 시작하면 해당 대상은 '수집 실패'로 남습니다.")
     if any(t.menus for t, _, _ in plan):
         print("  " + ui.dim("기존 메뉴가 있는 시트는 이미 있는 메뉴를 건너뛰고 새 메뉴만 이어서 넣습니다."))
     print()
@@ -766,9 +793,14 @@ def campaign(args):
     files = [name for _, _, name, _ in done if name]
     if files:
         print("  " + ui.dim(f"메뉴 목록 엑셀 {len(files)}개: {(Path('결과')).resolve()}"))
+    log = write_log(done, board, mode)
+    if log:
+        print("  " + ui.dim(f"작업 기록: {log}"))
     print()
     if isinstance(board, ExcelBoard) and board.current == board.src:
         ui.ok("새로 기입한 메뉴가 없어 새 진단 엑셀을 만들지 않았습니다. 작업 엑셀은 그대로입니다.")
+    if isinstance(board, ExcelBoard):
+        state.remember_workbook(board.current)       # next run: Enter continues from the latest copy
     if isinstance(board, ExcelBoard) and board.current != board.src:
         ui.ok("진단 엑셀 (원본은 그대로):")
         print("  " + str(board.out.resolve()))
@@ -778,6 +810,26 @@ def campaign(args):
         print("  " + ui.dim("붙여넣기 파일과 입력 내역(.tsv)은 결과 폴더에 있습니다."))
     if isinstance(stop, SystemExit):
         raise stop
+
+
+def write_log(done, board, mode):
+    """결과/작업기록_날짜.tsv: one line per target, for the report and for picking up where the run stopped."""
+    if not done:
+        return None
+    workbook = str(board.out.resolve()) if isinstance(board, ExcelBoard) and board.current != board.src else ""
+    lines = ["\t".join(["진단 시트", "점검 주소", "수집 방식", "수집 메뉴", "기입 결과", "입력", "중복 제외", "칸 부족", "위치",
+                        "메뉴 목록 엑셀", "진단 엑셀"])]
+    for f, n, name, url in done:
+        cells = [f.target.sheet, url, MODES.get(mode, mode), n, f.status, f.written, f.duplicates, f.overflow, f.where, name,
+                 workbook if f.status == "입력 완료" else ""]
+        lines.append("\t".join(" ".join(str(x).split()) for x in cells))
+    path = Path("결과") / f"작업기록_{datetime.now():%Y%m%d_%H%M%S}.tsv"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8-sig")
+    except OSError:
+        return None
+    return path.resolve()
 
 
 def split_tokens(raw):
@@ -838,7 +890,7 @@ def pick_plan(board, args, items):
     print()
     if items:
         print("  진단할 시트 번호나 이름, 또는 점검 주소를 입력하세요. 여러 개는 쉼표로 구분합니다.")
-        print("  " + ui.dim("예: 29-34, 36, 41 | 뉴욕 | 전체 (D6이 적힌 시트 모두) | https://... | ? = 전체 시트 목록"))
+        print("  " + ui.dim("예: 01-05, 07, 12 | 사이트A | 전체 (D6이 적힌 시트 모두) | https://... | ? = 전체 시트 목록"))
     else:
         print("  붙여넣을 진단 시트 이름이나 점검 주소를 입력하세요. 여러 개는 쉼표로 구분합니다.")
     plan = []

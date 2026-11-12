@@ -13,3 +13,4 @@ artifacts/
 결과/
 *.tsv
 google_sheet.json
+last_run.json

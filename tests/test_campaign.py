@@ -42,6 +42,8 @@ def test_numbers_dedupe_crawl_fill_and_rerun_adds_nothing(site, tmp_path, monkey
     ws = load_workbook(out)["02_빈시트"]
     first = [ws.cell(13, c).value for c in range(8, 12)]
     assert "고객센터" in first
+    log = next(tmp_path.glob("결과/작업기록_*.tsv")).read_text(encoding="utf-8-sig").splitlines()
+    assert log[0].startswith("진단 시트\t점검 주소") and log[1].split("\t")[4] == "입력 완료"
     # additional investigation on the filled copy: nothing new, no new file
     for f in tmp_path.glob("작업_메뉴입력_*"):
         os.utime(f)
@@ -61,7 +63,7 @@ def test_unreachable_target_is_reported_as_failure(tmp_path, monkeypatch, capsys
 
 
 def test_tokens_and_exact_names():
-    assert cli.split_tokens("1 2, 29 - 34, 뉴욕 지점") == ["1", "2", "29-34", "뉴욕 지점"]
+    assert cli.split_tokens("1 2, 29 - 34, 사이트 A") == ["1", "2", "29-34", "사이트 A"]
     items = [diag.Target("03_y", "m.example.com 모바일", d6="https://m.example.com"),
              diag.Target("04_z", "z", d6="https://www.example.com")]
     assert cli.exact_sheet("example.com", items) is None          # an address, not a sheet name
@@ -75,3 +77,16 @@ def test_result_file_name_keeps_dots(tmp_path, monkeypatch):
             "visited_count": 0, "limit_reached": False, "started_at": "", "finished_at": "", "phases_done": []}
     path = cli.save(data, "")
     assert path.name.startswith("www.example.com_메뉴목록_") and path.suffix == ".xlsx"
+
+
+def test_last_work_file_is_offered_and_names_do_not_stack(tmp_path, monkeypatch):
+    from menu_crawler import state
+    from menu_crawler.boards import ExcelBoard
+    monkeypatch.delenv("MENU_CRAWLER_NO_STATE")
+    monkeypatch.setattr(state, "FILE", tmp_path / "last_run.json")
+    book = book_with_domains(tmp_path / "작업_메뉴입력_20261112_080109.xlsx")
+    assert state.last_workbook() == ""
+    state.remember_workbook(book)
+    assert state.last_workbook() == str(book.resolve())
+    out = ExcelBoard(book).out.name
+    assert out.startswith("작업_메뉴입력_") and out.count("_메뉴입력_") == 1

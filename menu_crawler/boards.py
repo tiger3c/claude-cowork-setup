@@ -7,6 +7,7 @@
 All of them only ever put menu names into rows 13-15 of columns that hold no menu or result yet.
 """
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -141,7 +142,8 @@ class ExcelBoard:
 
     def __init__(self, path, out=""):
         self.src = Path(path)
-        self.out = Path(out) if out else self.src.with_name(f"{self.src.stem}_메뉴입력_{datetime.now():%Y%m%d_%H%M%S}{self.src.suffix}")
+        stem = re.sub(r"(_메뉴입력_\d{8}_\d{6})+$", "", self.src.stem)      # additional runs: no stacked suffixes
+        self.out = Path(out) if out else self.src.with_name(f"{stem}_메뉴입력_{datetime.now():%Y%m%d_%H%M%S}{self.src.suffix}")
         if self.out.suffix.lower() != self.src.suffix.lower():      # .xlsm content must keep .xlsm
             self.out = self.out.with_suffix(self.src.suffix)
         if self.out.resolve() == self.src.resolve() or (self.out.exists() and os.path.samefile(self.out, self.src)):

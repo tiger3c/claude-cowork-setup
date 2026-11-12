@@ -92,7 +92,8 @@ class Crawler:
                 continue
         if not self.browser:
             raise RuntimeError("브라우저를 열지 못했습니다. Edge/Chrome을 설치하거나 install_browser.bat를 실행하세요. 회사 브라우저 정책도 확인하세요.")
-        self.context = self.browser.new_context(accept_downloads=False, viewport={"width": 1440, "height": 1000})
+        # Test/dev servers of a diagnosis target often use self-signed certificates.
+        self.context = self.browser.new_context(accept_downloads=False, ignore_https_errors=True, viewport={"width": 1440, "height": 1000})
         self.context.on("page", lambda p: p.on("dialog", lambda dialog: dialog.dismiss()))
         self.page = self.context.new_page()
         self.page.set_default_timeout(self.config.timeout_ms)

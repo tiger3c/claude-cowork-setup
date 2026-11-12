@@ -1,0 +1,160 @@
+"""진단표 (the diagnosis board) the crawled menus go into, in three flavours:
+
+- SheetsBoard: the Google Sheet itself, through the Apps Script web app (values only, automatic).
+- PasteBoard : Google Sheets by hand - a paste block on the clipboard plus the exact cell to click.
+- ExcelBoard : an .xlsx/.xlsm file - a new copy with the menus filled in (the original is untouched).
+
+All of them only ever put menu names into rows 13-15 of columns that hold no menu or result yet.
+"""
+import os
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+
+from . import ui
+from . import workbook as diag
+from .gsheet import SheetError
+
+
+@dataclass
+class Filled:
+    target: diag.Target
+    status: str                 # 입력 완료 / 붙여넣기 준비 / 새 메뉴 없음 / 건너뜀 / 실패
+    where: str = ""
+    written: int = 0
+    duplicates: int = 0
+    overflow: int = 0
+    file: str = ""
+
+
+def _range(first, last):
+    return f"{diag.L(first)}13:{diag.L(last)}15"
+
+
+def _preview(menus, limit=5):
+    for depths in menus[:limit]:
+        print("    " + ui.dim("· ") + " > ".join(d for d in depths if d))
+    if len(menus) > limit:
+        print("    " + ui.dim(f"… 외 {len(menus) - limit}개"))
+
+
+def _safe(name):
+    return "".join("_" if c in '\\/:*?"<>|' else c for c in name).strip(" .") or "진단시트"
+
+
+class SheetsBoard:
+    kind = "gsheet"
+    listed = False
+
+    def __init__(self, client, title=""):
+        self.client, self.title = client, title
+        self.label = f"구글 시트 자동 입력 · {title}" if title else "구글 시트 자동 입력"
+
+    def targets(self):
+        self.title, items = self.client.targets()
+        self.label = f"구글 시트 자동 입력 · {self.title}"
+        return items
+
+    def fill(self, target, menus, interactive, out_dir):
+        try:
+            pre = self.client.fill(target.sheet, menus, dry_run=True)
+            count = len(pre["write"])
+            print(f"  시트에 있는 메뉴 {pre['existing']}개 · 새로 입력 {count}개 · 이미 있어 뺀 메뉴 {len(pre['duplicates'])}개"
+                  + (f" · 칸 부족 {len(pre['overflow'])}개" if pre["overflow"] else ""))
+            if not count:
+                return Filled(target, "새 메뉴 없음", duplicates=len(pre["duplicates"]), overflow=len(pre["overflow"]))
+            print(f"  입력 위치: ‘{target.sheet}’ {pre['range']}  (값만 입력 · 서식·수식·결과 칸은 그대로)")
+            _preview(pre["write"])
+            if interactive and not ui.ask_yes("  구글 시트에 바로 입력할까요?", True):
+                return Filled(target, "건너뜀")
+            res = self.client.fill(target.sheet, menus)
+        except SheetError as exc:
+            ui.fail(str(exc))
+            return Filled(target, "실패")
+        ui.ok(f"구글 시트 ‘{target.sheet}’ {res['range']}에 {res['written']}개 입력했습니다.")
+        record = diag.Plan(target.sheet, [], res["existing"], list(zip(range(res["start"], res["start"] + res["written"]), res["write"])),
+                           res["duplicates"], res["overflow"])
+        rec = diag.receipt(record, Path(out_dir) / f"구글시트입력_{_safe(target.sheet)}_{datetime.now():%Y%m%d_%H%M%S}_입력내역.tsv")
+        return Filled(target, "입력 완료", res["range"], res["written"], len(res["duplicates"]), len(res["overflow"]), str(rec))
+
+
+class PasteBoard:
+    kind = "google"
+    listed = False
+
+    def __init__(self, snapshot="", copy=None):
+        self.snapshot, self.copy = snapshot, copy
+        self.label = "구글 시트 붙여넣기" + (f" · {Path(snapshot).name} 기준" if snapshot else "")
+
+    def targets(self):
+        return diag.targets(self.snapshot) if self.snapshot else []
+
+    def fill(self, target, menus, interactive, out_dir):
+        sheet = target.sheet
+        p = diag.plan_paste(self.snapshot or None, sheet, menus)
+        if p.checked:
+            print(f"  시트에 있는 메뉴 {p.existing}개 · 새로 붙여넣을 메뉴 {len(p.menus)}개 · 이미 있어 뺀 메뉴 {len(p.duplicates)}개")
+        if not p.menus:
+            print("  붙여넣을 새 메뉴가 없습니다.")
+            return Filled(target, "새 메뉴 없음", duplicates=len(p.duplicates), overflow=len(p.overflow))
+        if not p.checked:
+            print(f"  붙여넣을 메뉴 {len(p.menus)}개")
+            ui.note("메뉴가 없는 빈 진단 시트에만 붙여넣으세요. 메뉴가 있는 시트라면 구글 시트를 .xlsx로 내려받아 지정하면 이어 붙일 칸을 계산합니다.")
+        where = _range(p.start, p.start + len(p.menus) - 1)
+        cell = f"{diag.L(p.start)}13"
+        base = Path(out_dir) / f"구글시트붙여넣기_{_safe(sheet)}_{datetime.now():%Y%m%d_%H%M%S}"
+        tsv = base.with_suffix(".tsv")
+        block = diag.paste_text(p.menus)
+        tsv.write_text(block + "\r\n", encoding="utf-8")
+        record = diag.Plan(sheet, [], p.existing, list(zip(range(p.start, p.start + len(p.menus)), p.menus)), p.duplicates, p.overflow)
+        diag.receipt(record, base.with_name(base.name + "_입력내역.tsv"))
+        print()
+        print("  " + ui.bold(f"‘{sheet or '진단 시트'}’ 시트의 {cell} 칸을 클릭 → Ctrl+V") + ui.dim(f"   (채워지는 범위 {where})"))
+        print("  " + ui.dim(f"붙여넣기 파일: {tsv.resolve()}"))
+        if self.copy and self.copy(block):
+            ui.ok("클립보드에 복사했습니다.")
+        else:
+            ui.note("자동 복사를 하지 못했습니다. 붙여넣기 파일을 메모장으로 열어 전체 복사하세요.")
+        if p.overflow:
+            ui.note(f"칸이 부족해 넣지 못한 메뉴 {len(p.overflow)}개는 입력 내역 파일에 '칸 부족'으로 남겼습니다.")
+        if interactive:
+            ui.ask("  구글 시트에 붙여넣었으면 Enter")
+        return Filled(target, "붙여넣기 준비", where, len(p.menus), len(p.duplicates), len(p.overflow), str(tsv))
+
+
+class ExcelBoard:
+    kind = "excel"
+    listed = False
+
+    def __init__(self, path, out=""):
+        self.src = Path(path)
+        self.out = Path(out) if out else self.src.with_name(f"{self.src.stem}_메뉴입력_{datetime.now():%Y%m%d_%H%M%S}{self.src.suffix}")
+        self.current = self.src
+        self.label = f"엑셀 파일 · {self.src.name} → {self.out.name}"
+
+    def targets(self):
+        return diag.targets(self.current)
+
+    def fill(self, target, menus, interactive, out_dir):
+        p = diag.plan(self.current, target.sheet, menus)
+        print(f"  시트에 있는 메뉴 {p.existing}개 · 새로 입력 {len(p.to_write)}개 · 이미 있어 뺀 메뉴 {len(p.duplicates)}개"
+              + (f" · 칸 부족 {len(p.overflow)}개" if p.overflow else ""))
+        if not p.to_write:
+            return Filled(target, "새 메뉴 없음", duplicates=len(p.duplicates), overflow=len(p.overflow))
+        where = _range(p.to_write[0][0], p.to_write[-1][0])
+        print(f"  입력 위치: ‘{target.sheet}’ {where}  (값만 입력 · 서식·수식·결과 칸은 그대로)")
+        _preview([d for _, d in p.to_write])
+        try:
+            if self.current == self.src:
+                diag.write(self.src, self.out, p)
+            else:   # later targets go into the same output file
+                tmp = self.out.with_name(self.out.stem + "_tmp" + self.out.suffix)
+                diag.write(self.out, tmp, p)
+                os.replace(tmp, self.out)
+        except PermissionError:
+            ui.fail(f"'{self.out.name}' 파일이 엑셀에서 열려 있어 저장하지 못했습니다. 파일을 닫고 다시 실행하세요.")
+            return Filled(target, "실패")
+        self.current = self.out
+        diag.receipt(p, self.out.with_name(f"{self.out.stem}_{_safe(target.sheet)}_입력내역.tsv"))
+        ui.ok(f"‘{target.sheet}’ {where}에 {len(p.to_write)}개 입력했습니다. → {self.out.name}")
+        return Filled(target, "입력 완료", where, len(p.to_write), len(p.duplicates), len(p.overflow), str(self.out.resolve()))

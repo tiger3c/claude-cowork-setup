@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zipfile
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -21,6 +22,10 @@ from pydantic import ValidationError
 
 from .crawler import Job
 from . import workbook as diag
+from . import gsheet, ui
+from .boards import ExcelBoard, Filled, PasteBoard, SheetsBoard
+from .gsheet import SheetError
+from .ui import ask, ask_int, ask_yes
 from .export import make_workbook, select_menus
 from .models import MODES, CrawlConfig
 
@@ -40,42 +45,16 @@ def line(char="─"):
 
 
 def title(text):
-    print()
-    line("═")
-    print(f"  {text}")
-    line("═")
-
-
-def ask(prompt, default=""):
-    suffix = f" [{default}]" if default else ""
-    try:
-        value = input(f"{prompt}{suffix}: ").strip()
-    except EOFError:
-        value = ""
-    return value or default
-
-
-def ask_yes(prompt, default=False):
-    mark = "Y/n" if default else "y/N"
-    value = ask(f"{prompt} ({mark})").lower()
-    return default if not value else value in {"y", "yes", "예", "ㅇ"}
-
-
-def ask_int(prompt, default, low, high):
-    while True:
-        value = ask(prompt, str(default))
-        if value.isdigit() and low <= int(value) <= high:
-            return int(value)
-        print(f"  {low}~{high} 사이 숫자를 입력하세요.")
+    ui.header(text)
 
 
 # ---------- 입력 받기 ----------
 
-def ask_url(initial):
+def ask_url(initial, prompt="수집할 사이트 주소 (예: https://www.example.com)", default=""):
     url = initial
     while True:
         if not url:
-            url = ask("수집할 사이트 주소 (예: https://www.example.com)")
+            url = ask(prompt, default)
         if url and "://" not in url:
             url = "https://" + url
         try:
@@ -85,7 +64,7 @@ def ask_url(initial):
             url = ""
 
 
-def ask_mode(initial):
+def ask_mode(initial, default="1"):
     if initial:
         return initial
     print()
@@ -93,7 +72,7 @@ def ask_mode(initial):
     for key, mode in MODE_KEYS.items():
         print(f"  {key}) {MODES[mode]:<16} - {MODE_HELP[mode]}")
     while True:
-        value = ask("번호", "1")
+        value = ask("번호", default)
         if value in MODE_KEYS:
             return MODE_KEYS[value]
         print("  1, 2, 3 중에서 선택하세요.")
@@ -390,95 +369,178 @@ def powershell_clipboard(text):
         os.unlink(temp)
 
 
-def google_paste_step(menus, args, interactive, out_dir):
-    """Prepare a paste block for a Google Sheets 진단 시트 and tell exactly where to paste it."""
-    snapshot, sheet = args.snapshot, args.sheet
-    if not snapshot and interactive:
-        print()
-        print("  붙여넣을 위치를 정확히 계산하려면 구글 시트를 엑셀로 내려받은 파일이 필요합니다.")
-        print("  (구글 시트 → 파일 → 다운로드 → Microsoft Excel(.xlsx))")
-        snapshot = ask_path("  내려받은 파일 경로 (메뉴가 없는 빈 진단 시트에 붙여넣을 거면 Enter)")
-    if snapshot:
-        book = diag.Workbook(snapshot)
-        if not sheet:
-            if not interactive:
-                sys.exit("--sheet 로 붙여넣을 진단 시트를 지정하세요.")
-            sheet = pick_sheet(book)
-        try:
-            sheet = diag.resolve_sheet(book, sheet)
-        except ValueError as exc:
-            sys.exit(str(exc))
-    p = diag.plan_paste(snapshot or None, sheet, menus)
-    title("구글 시트에 붙여넣기" + (f" · {sheet}" if sheet else ""))
-    if not p.menus:
-        print("  붙여넣을 새 메뉴가 없습니다." + (f" (이미 있는 메뉴 {len(p.duplicates)}개)" if p.duplicates else ""))
-        return None
-    cell = f"{diag.L(p.start)}13"
-    last = diag.L(p.start + len(p.menus) - 1)
-    if p.checked:
-        print(f"  시트에 이미 있는 메뉴 {p.existing}개 · 새로 붙여넣을 메뉴 {len(p.menus)}개 · 이미 있어 뺀 메뉴 {len(p.duplicates)}개")
-    else:
-        print(f"  붙여넣을 메뉴 {len(p.menus)}개")
-        print("  ※ 메뉴가 없는 빈 진단 시트에만 붙여넣으세요. 메뉴가 있는 시트에 붙여넣으면 기존 메뉴를 덮어씁니다.")
-    where = f"‘{sheet}’ 시트의 " if sheet else "진단 시트의 "
-    print(f"  방법: {where}{cell} 칸을 클릭 → Ctrl+V  (채워지는 범위 {cell}:{last}15)")
-    block = diag.paste_text(p.menus)
-    base = Path(out_dir) / f"구글시트붙여넣기_{sheet or '진단시트'}_{datetime.now():%Y%m%d_%H%M%S}"
-    tsv = base.with_suffix(".tsv")
-    tsv.write_text(block + "\r\n", encoding="utf-8")
-    print(f"  붙여넣기 파일: {tsv.resolve()}")
-    record = diag.Plan(sheet or "", [], p.existing, list(zip(range(p.start, p.start + len(p.menus)), p.menus)), p.duplicates, p.overflow)
-    rec = diag.receipt(record, base.with_name(base.name + "_입력내역.tsv"))
-    print(f"  입력 내역: {rec.resolve()}")
-    if p.overflow:
-        print(f"  ※ 칸이 부족해 넣지 못한 메뉴 {len(p.overflow)}개는 입력 내역 파일에 '칸 부족'으로 남겼습니다.")
-    if os.name == "nt":
-        if copy_to_clipboard(block):
-            print(f"  ✔ 클립보드에 복사했습니다. 구글 시트에서 {cell} 칸을 클릭하고 Ctrl+V 하세요.")
-        else:
-            print("  클립보드 복사에 실패했습니다. 붙여넣기 파일을 메모장으로 열어 전체 복사하세요.")
-    else:
-        print("  ※ 이 PC에서는 자동 복사를 지원하지 않습니다. 붙여넣기 파일 내용을 복사해 붙여넣으세요.")
-    return tsv
+# ---------- 진단표 기입 ----------
+
+BOARD_KEYS = {"1": "gsheet", "2": "google", "3": "excel", "4": None}
 
 
-def pick_sheet(book):
-    sheets = book.site_sheets()
-    print()
-    print("  번호) 진단 시트                     기존 메뉴 / 빈 칸")
-    for i, name in enumerate(sheets, 1):
-        menus_n, free_n = diag.sheet_summary(book, name)
-        print(f"  {i:3}) {name[:28]:30} {menus_n:5} / {free_n}")
+def connect_google(interactive, force=False):
+    """Client for the Google Sheet web app; asks for the connection once and keeps it on this PC."""
+    cfg = None if force else gsheet.load_config()
+    if cfg:
+        return gsheet.Client(cfg["url"], cfg["token"])
+    if not interactive:
+        sys.exit("구글 시트 연결 정보가 없습니다. 먼저 run.bat --connect-google 로 연결하세요.")
+    ui.header("구글 시트 연결", "처음 1회만")
+    print("  1. 진단표 구글 시트 → 확장 프로그램 → Apps Script")
+    print(f"  2. {Path(__file__).resolve().parent.parent / 'apps_script' / 'MenuImport.gs'} 내용을 붙여넣고 저장")
+    print("  3. 함수 setup 실행 → 실행 로그의 '연결 키' 복사")
+    print("  4. 배포 → 새 배포 → 웹 앱 (실행: 나 / 액세스: 모든 사용자) → 웹 앱 URL 복사")
+    print("  " + ui.dim("자세한 설명: README의 '구글 시트 자동 입력 연결'"))
     while True:
-        pick = ask("  메뉴를 넣을 진단 시트 번호")
-        if pick.isdigit() and 1 <= int(pick) <= len(sheets):
-            return sheets[int(pick) - 1]
-        print("  목록의 번호를 입력하세요.")
+        url = ask("  웹 앱 URL (취소하려면 Enter)")
+        if not url:
+            return None
+        token = ask("  연결 키")
+        try:
+            client = gsheet.Client(url, token)
+            title_ = client.ping()
+        except SheetError as exc:
+            ui.fail(str(exc))
+            continue
+        path = gsheet.save_config(client.url, client.token)
+        ui.ok(f"연결했습니다: {title_}  " + ui.dim(f"(연결 정보: {path.name}, 이 PC에만 저장)"))
+        return client
 
 
-def fill_step(menus, args, interactive, out_dir):
-    """크롤링 결과를 진단표에 기입: 구글 시트(붙여넣기) 또는 엑셀 파일(자동 입력)."""
-    target = args.target
-    if not target:
-        if args.workbook:
-            target = "excel"
-        elif not interactive:
-            target = "google"
+def choose_board(args, interactive):
+    """Which 진단표 the menus go into. None = collect only."""
+    kind = args.target or ("excel" if args.workbook else None)
+    path = args.workbook
+    if not kind:
+        if not interactive:
+            kind = "google"
         else:
-            print()
-            print("  진단표 기입 방법을 선택하세요.")
-            print("    1) 구글 시트에 붙여넣기 (클립보드 복사 + 붙여넣을 칸 안내)")
-            print("    2) 엑셀 파일(.xlsx/.xlsm)에 바로 입력")
-            print("    3) 건너뛰기")
-            target = {"1": "google", "2": "excel"}.get(ask("  번호", "1"), "none")
-    if target == "google":
-        return google_paste_step(menus, args, interactive, out_dir)
-    if target == "excel":
-        return workbook_step(menus, args, interactive)
+            print("  작업할 진단 엑셀 파일을 붙여넣어 주세요. " + ui.dim("(파일을 이 창에 끌어다 놓아도 됩니다)"))
+            print("  " + ui.dim("다른 방법: g = 구글 시트에 바로 입력 · p = 구글 시트 붙여넣기 · Enter = 기입 없이 수집만"))
+            while True:
+                value = ask("  작업 엑셀").strip().strip('"').strip("'").strip()
+                if value.lower() in {"g", "ㅎ"}:
+                    kind = "gsheet"
+                elif value.lower() in {"p", "ㅔ"}:
+                    kind = "google"
+                elif not value:
+                    return None
+                elif Path(value).is_file() and value.lower().endswith((".xlsx", ".xlsm")):
+                    kind, path = "excel", value
+                else:
+                    print("  .xlsx 또는 .xlsm 파일을 붙여넣어 주세요. 경로가 맞는지, 파일이 있는지 확인하세요.")
+                    continue
+                break
+    if kind == "gsheet":
+        try:
+            client = connect_google(interactive)
+        except SheetError as exc:
+            sys.exit(str(exc))
+        if client is None:
+            return choose_board(args, interactive) if interactive else None
+        return SheetsBoard(client)
+    if kind == "google":
+        snapshot = args.snapshot
+        if not snapshot and interactive:
+            print("  " + ui.dim("이미 메뉴가 있는 시트에 이어 붙이려면 구글 시트를 .xlsx로 내려받아 지정합니다. (파일 → 다운로드 → Microsoft Excel)"))
+            snapshot = ask_path("  내려받은 .xlsx 경로 (빈 시트에 붙여넣을 거면 Enter)")
+        return PasteBoard(snapshot, copy_to_clipboard if os.name == "nt" else None)
+    if kind == "excel":
+        path = path or (ask_path("  작업할 진단 엑셀 파일을 붙여넣어 주세요") if interactive else "")
+        if not path:
+            return None
+        try:
+            board = ExcelBoard(path, args.workbook_out)
+            count = len(board.targets())
+        except (OSError, KeyError, ValueError, zipfile.BadZipFile) as exc:
+            if not interactive:
+                sys.exit(f"진단 엑셀을 읽을 수 없습니다: {exc}")
+            ui.fail(f"진단 엑셀을 읽을 수 없습니다: {exc}")
+            args.workbook = ""
+            return choose_board(args, interactive)
+        if not count:
+            ui.fail("이 파일에서 진단 시트(01_, 02_ … 형식)를 찾지 못했습니다.")
+            if not interactive:
+                sys.exit(1)
+            args.workbook = ""
+            return choose_board(args, interactive)
+        ui.ok(f"{Path(path).name} · 진단 시트 {count}개를 찾았습니다. " + ui.dim(f"(기입 결과는 {board.out.name} 로 저장, 원본은 그대로)"))
+        return board
     return None
 
 
-# ---------- 실행 ----------
+def show_targets(items):
+    rows = [[t.sheet, str(t.menus) if t.menus else "-", t.cell, t.domain or ""] for t in items]
+    ui.table([("진단 시트", 34), ("기존 메뉴", 9), ("입력 시작", 9), ("대표 도메인", 0)], rows, indent="    ")
+
+
+def load_targets(board):
+    try:
+        return board.targets()
+    except SheetError as exc:
+        sys.exit(str(exc))
+
+
+def map_url(url, items, interactive, query=""):
+    """Inspection URL -> 진단 시트 by 대표 도메인 (D6). -> (sheet or None, sheets to choose from)."""
+    if query:
+        return None, items
+    found = diag.match_url(url, items)
+    if len(found) == 1:
+        ui.ok(f"대표 도메인 일치 → {found[0].sheet}")
+        return found[0], items
+    if found:
+        ui.note("대표 도메인이 같은 진단 시트가 여러 개입니다. 하나를 고르세요.")
+    else:
+        ui.note("대표 도메인(D6)이 일치하는 진단 시트가 없어 진단 대상을 지정합니다.")
+    if not interactive:
+        sys.exit("--sheet 로 진단 시트를 지정하세요. (진단 시트 D6에 대표 도메인을 적어 두면 자동으로 찾습니다)")
+    return None, found or items
+
+
+def choose_targets(board, args, interactive, many=False, url="", items=None):
+    items = load_targets(board) if items is None else items
+    query = args.sheet
+    pool = items
+    if url and items:
+        hit, pool = map_url(url, items, interactive, query)
+        if hit:
+            return [hit]
+    if not items:   # paste mode without a downloaded copy: sheet names as typed
+        if not query and interactive:
+            query = ask("  붙여넣을 진단 시트 이름" + (" (여러 개는 쉼표로 구분)" if many else ""))
+        names = [n.strip() for n in (query or "").split(",") if n.strip()] or [""]
+        return [diag.Target(n, n) for n in (names if many else names[:1])]
+    if interactive and not query and (pool is not items or not board.listed):
+        show_targets(pool)     # the full list once per run; a narrowed list every time
+        board.listed = board.listed or pool is items
+    example = "예: 사이트A, 사이트B" if many else "예: 사이트A"
+    while True:
+        if not query:
+            if not interactive:
+                sys.exit("--sheet 로 진단 시트를 지정하세요. 예: --sheet 01_사이트A")
+            query = ask(f"  진단 대상 (시트 이름 일부만 써도 됩니다 · {'여러 개는 쉼표로 구분 · ' if many else ''}{example})")
+        try:
+            picked = diag.select_targets(query, pool)
+            if picked and (many or len(picked) == 1):
+                return picked
+            ui.fail("이 단계에서는 진단 대상을 하나만 지정하세요.")
+        except ValueError as exc:
+            if not interactive:
+                sys.exit(str(exc))
+            for msg in str(exc).splitlines():
+                ui.fail(msg)
+        query = ""
+
+
+def fill_step(menus, args, interactive, out_dir, url=""):
+    """One crawl result -> one 진단 시트 (used after a single crawl and with --from-result)."""
+    if interactive:
+        ui.header("진단표 기입")
+    board = choose_board(args, interactive)
+    if board is None:
+        return None
+    target = choose_targets(board, args, interactive, url=url)[0]
+    print()
+    print("  " + ui.bold(f"▶ {target.sheet or '진단 시트'}"))
+    return board.fill(target, menus, interactive, out_dir)
+
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(prog="메뉴수집", description="웹사이트 메뉴를 1·2·3 Depth로 수집해 엑셀로 정리합니다. 옵션 없이 실행하면 하나씩 물어봅니다.")
@@ -502,12 +564,16 @@ def parse_args(argv=None):
     p.add_argument("--workbook", default="", help="메뉴를 입력할 진단 엑셀(.xlsx) 경로")
     p.add_argument("--sheet", default="", help="메뉴를 입력할 진단 시트 이름 (예: 01_사이트A)")
     p.add_argument("--workbook-out", default="", help="메뉴를 입력한 진단 엑셀을 저장할 경로 (기본: 원본 옆에 새 파일)")
-    p.add_argument("--target", choices=["google", "excel"], help="진단표 기입 방법: google=구글 시트 붙여넣기, excel=엑셀 파일 직접 입력")
+    p.add_argument("--target", choices=["gsheet", "google", "excel"], help="진단표 기입 방법: gsheet=구글 시트 자동 입력, google=구글 시트 붙여넣기, excel=엑셀 파일 직접 입력")
+    p.add_argument("--connect-google", action="store_true", help="구글 시트 자동 입력 연결(웹 앱 URL·연결 키) 설정")
     p.add_argument("--snapshot", default="", help="구글 시트를 엑셀로 내려받은 파일 (붙여넣을 위치·중복 계산용)")
     p.add_argument("--include-unverified", action="store_true", help="로그인 필요·접속 실패 등으로 확인하지 못한 메뉴도 진단 시트에 입력")
     p.add_argument("--from-result", default="", help="크롤링 없이, 이전에 만든 수집 결과 엑셀의 메뉴를 진단 엑셀에 입력")
     return p.parse_args(argv)
 
+
+
+# ---------- 실행 ----------
 
 def ask_path(prompt):
     while True:
@@ -517,6 +583,7 @@ def ask_path(prompt):
         if Path(value).is_file() and value.lower().endswith((".xlsx", ".xlsm")):
             return value
         print("  .xlsx 또는 .xlsm 파일 경로를 확인하세요. (파일을 이 창으로 끌어다 놓아도 됩니다)")
+
 
 
 def choose_menus(confirmed, unverified, args, interactive):
@@ -532,91 +599,12 @@ def choose_menus(confirmed, unverified, args, interactive):
     return confirmed + [d for d, _ in unverified] if args.include_unverified else confirmed
 
 
-def workbook_step(menus, args, interactive):
-    """Put the menus into a diagnosis sheet of the diagnosis workbook."""
-    path = args.workbook
-    if not path:
-        if not interactive or not ask_yes("진단 엑셀의 진단 시트에 메뉴를 바로 입력할까요?", False):
-            return None
-        path = ask_path("  진단 엑셀(.xlsx/.xlsm) 경로")
-        if not path:
-            return None
-    book = diag.Workbook(path)
-    sheet = args.sheet
-    if not sheet:
-        if not interactive:
-            sys.exit("--sheet 로 진단 시트 이름을 지정하세요. 예: --sheet 01_사이트A")
-        sheet = pick_sheet(book)
-    try:
-        sheet = diag.resolve_sheet(book, sheet)
-    except ValueError as exc:
-        sys.exit(str(exc))
-    p = diag.plan(path, sheet, menus)
-    title(f"진단 시트 입력 · {sheet}")
-    print(f"  시트에 이미 있는 메뉴 {p.existing}개 · 비어 있는 열 {len(p.free_columns)}개")
-    print(f"  새로 입력 {len(p.to_write)}개 · 이미 있는 메뉴라 건너뜀 {len(p.duplicates)}개 · 칸 부족 {len(p.overflow)}개")
-    if p.to_write:
-        first, last = p.to_write[0][0], p.to_write[-1][0]
-        print(f"  입력 위치: {diag.L(first)}13 ~ {diag.L(last)}15 (결과 칸 20~67행과 기존 메뉴 열은 건드리지 않습니다)")
-    if not p.to_write:
-        print("  입력할 새 메뉴가 없습니다.")
-        return None
-    print()
-    for col, depths in p.to_write[:5]:
-        print(f"    {diag.L(col):>3}열  " + " > ".join(d for d in depths if d))
-    if len(p.to_write) > 5:
-        print(f"    … 외 {len(p.to_write) - 5}개")
-    src = Path(path)
-    dst = Path(args.workbook_out) if args.workbook_out else src.with_name(f"{src.stem}_메뉴입력_{datetime.now():%Y%m%d_%H%M%S}{src.suffix}")
-    if interactive and not ask_yes(f"  '{dst.name}' 파일로 저장할까요? (원본은 그대로 둡니다)", True):
-        print("  취소했습니다.")
-        return None
-    out = diag.write(src, dst, p)
-    print(f"  ✔ 저장: {out.resolve()}")
-    rec = diag.receipt(p, out.with_name(out.stem + "_입력내역.tsv"))
-    print(f"  입력 내역: {rec.resolve()}")
-    if p.overflow:
-        print(f"  ※ 칸이 부족해 넣지 못한 메뉴 {len(p.overflow)}개는 입력 내역 파일에 '칸 부족'으로 남겼습니다.")
-    if os.name == "nt" and interactive and not args.no_open and ask_yes("  저장한 진단 엑셀을 열까요?", False):
-        os.startfile(out)  # noqa: S606 - Windows only, local file the user just created
-    return out
 
 
-def finish(data, args):
-    summary(data)
-    path = save(data, args.out)
-    print()
-    print(f"  엑셀 저장: {path}")
-    confirmed, unverified = diag.menus_from_report(data, include_unverified=True)
-    fill_step(choose_menus(confirmed, unverified, args, not args.yes), args, not args.yes, Path(path).parent)
-    if os.name == "nt" and not args.no_open and not args.yes and ask_yes("전체 메뉴 엑셀 파일을 열까요?", False):
-        os.startfile(path)  # noqa: S606 - Windows only, local result file
-
-
-def main(argv=None):
-    for stream in (sys.stdout, sys.stderr):
-        try:
-            stream.reconfigure(encoding="utf-8")
-        except (AttributeError, ValueError):
-            pass
-    args = parse_args(argv)
-    if args.from_result:
-        title("수집 결과 → 진단 시트 입력")
-        try:
-            menus = diag.menus_from_result(args.from_result)
-            unverified = diag.unverified_from_result(args.from_result)
-        except (ValueError, OSError) as exc:
-            sys.exit(f"수집 결과 파일을 읽을 수 없습니다: {exc}")
-        print(f"  수집 결과에서 진단 메뉴 {len(menus)}개를 읽었습니다.")
-        menus = choose_menus(menus, unverified, args, not args.yes)
-        fill_step(menus, args, not args.yes, Path(args.from_result).parent)
-        return
-    config = build_config(args)
-
-    title(MODES[config.mode])
+def run_crawl(config, args):
+    """Open the browser, crawl (with the login step when needed) and close it. -> (data or None, error or None)."""
     print("  브라우저를 여는 중입니다...")
     job = Job(config)
-    data = None
     try:
         data = wait(job, quiet=True)
         print("  " + data["message"])
@@ -630,20 +618,155 @@ def main(argv=None):
                 data = crawl(job, "after")
             else:
                 data = job.snapshot()
-        finish(data, args)
+        return data, None
     except (KeyboardInterrupt, EngineError) as exc:
         print(f"\n  실행 오류: {exc}" if isinstance(exc, EngineError) else "\n  중단했습니다.")
         job.stop.set()
         data = job.snapshot()
         if data["menus"]:
             print("  지금까지 수집한 결과를 저장합니다.")
-            args.yes = True  # no more questions after an interruption
-            finish(data, args)
-        elif isinstance(exc, EngineError):
-            sys.exit(1)
+            return data, exc
+        return None, exc
     finally:
         job.close()
         job.thread.join(timeout=10)
+
+
+def finish(data, args):
+    summary(data)
+    path = save(data, args.out)
+    print()
+    ui.ok(f"메뉴 목록 엑셀: {path}")
+    confirmed, unverified = diag.menus_from_report(data, include_unverified=True)
+    fill_step(choose_menus(confirmed, unverified, args, not args.yes), args, not args.yes, Path(path).parent, data["config"]["url"])
+    if os.name == "nt" and not args.no_open and not args.yes and ask_yes("메뉴 목록 엑셀 파일을 열까요?", False):
+        os.startfile(path)  # noqa: S606 - Windows only, local result file
+
+
+def single_run(args):
+    config = build_config(args)
+    title(MODES[config.mode])
+    data, error = run_crawl(config, args)
+    if data is None:
+        if isinstance(error, EngineError):
+            sys.exit(1)
+        return
+    if error is not None:
+        args.yes = True  # no more questions after an interruption
+    finish(data, args)
+
+
+def campaign(args):
+    """진단표 → 진단 대상(여러 개) → 수집 방식 → 대상별 주소 → 대상마다 수집·결과 저장·기입 → 요약."""
+    ui.header("웹 메뉴 수집기", "수집 → 메뉴 목록 엑셀 → 진단표 기입")
+    ui.step(1, 3, "작업할 진단 엑셀")
+    board = choose_board(args, True)
+    if board is None:
+        return single_run(args)
+    items = load_targets(board)
+    ui.step(2, 3, "점검 주소")
+    print("  점검할 주소를 하나씩 입력하세요. 진단 시트의 대표 도메인과 비교해 기입할 시트를 찾습니다.")
+    print("  " + ui.dim("다 입력했으면 빈 칸에서 Enter"))
+    plan = []
+    while True:
+        raw = ask(f"  점검 주소 {len(plan) + 1}")
+        if not raw:
+            if plan:
+                break
+            print("  점검 주소를 하나 이상 입력하세요.")
+            continue
+        url = ask_url(raw)
+        target = choose_targets(board, args, True, url=url, items=items)[0]
+        if any(t.sheet and t.sheet == target.sheet for t, _, _ in plan):
+            ui.note(f"{target.sheet} 은(는) 이미 목록에 있습니다.")
+            continue
+        plan.append((target, url, ""))
+        print("  " + ui.dim(f"→ {len(plan)}번: {target.sheet or '진단 시트'}  {url}"))
+    ui.step(3, 3, "수집 방식 (모든 대상 공통)")
+    mode = ask_mode(args.mode, default="2")
+    if mode != "public":
+        print("  " + ui.dim("로그인 페이지 주소가 따로 있으면 입력하세요. 없으면 Enter (점검 주소에서 직접 이동)"))
+        plan = [(t, url, ask(f"    {t.sheet or '진단 시트'} 로그인 주소")) for t, url, _ in plan]
+    settings = {"max_pages": args.max_pages, "max_seconds": args.max_seconds, "max_hops": args.max_hops,
+                "wait_ms": args.wait_ms, "delay_ms": args.delay_ms}
+    if ask_yes("  고급 설정(방문 페이지 수·시간·간격)을 바꿀까요?"):
+        settings["max_pages"] = ask_int("    최대 방문 페이지 수", settings["max_pages"], 1, 2000)
+        settings["max_seconds"] = ask_int("    대상별 최대 수집 시간(초)", settings["max_seconds"], 10, 7200)
+        settings["delay_ms"] = ask_int("    페이지 간 간격(ms)", settings["delay_ms"], 0, 5000)
+
+    ui.header("작업 순서 확인", board.label)
+    ui.table([("순서", 4), ("진단 시트", 34), ("점검 주소", 0)],
+             [[str(i), t.sheet or "진단 시트", url] for i, (t, url, _) in enumerate(plan, 1)])
+    print(f"  수집 방식: {MODES[mode]} · 대상별 최대 {settings['max_pages']}페이지 / {settings['max_seconds']}초")
+    if mode != "public":
+        print("  " + ui.dim("대상마다 브라우저 창이 열리면 직접 로그인한 뒤 Enter를 누릅니다."))
+    if not ask_yes("  모든 대상의 점검 권한(계약·승인)을 확인했고, 이대로 시작할까요?", True):
+        sys.exit("취소했습니다.")
+
+    done = []
+    for i, (t, url, login_url) in enumerate(plan, 1):
+        ui.header(f"[{i}/{len(plan)}] {t.name or t.sheet}", f"{t.sheet} · {url}")
+        try:
+            config = CrawlConfig(url=url, mode=mode, site_name=(t.name or t.sheet or urlsplit(url).hostname or "메뉴 수집")[:120],
+                                 login_url=login_url, extra_hosts=args.extra_host, browser=args.browser,
+                                 menu_selector=args.selector, headless=args.headless and mode == "public", **settings)
+        except ValidationError as exc:
+            ui.fail("입력값 오류: " + "; ".join(e["msg"] for e in exc.errors()))
+            done.append((Filled(t, "실패"), 0, ""))
+            continue
+        data, _ = run_crawl(config, args)
+        if data is None:
+            ui.fail("수집한 메뉴가 없습니다.")
+            done.append((Filled(t, "수집 실패"), 0, ""))
+        else:
+            summary(data)
+            path = save(data, "")
+            print()
+            ui.ok(f"메뉴 목록 엑셀: {path}")
+            confirmed, unverified = diag.menus_from_report(data, include_unverified=True)
+            menus = choose_menus(confirmed, unverified, args, True)
+            print()
+            print("  " + ui.bold(f"▶ 진단표 기입 · {t.sheet or '진단 시트'}"))
+            done.append((board.fill(t, menus, True, path.parent), len(menus), path.name))
+        if i < len(plan):
+            nxt = plan[i][0]
+            if not ask_yes(f"  다음 대상 ‘{nxt.sheet or '진단 시트'}’ 수집을 시작할까요?", True):
+                break
+
+    ui.header("작업 결과", board.label)
+    ui.table([("진단 시트", 28), ("수집", 5), ("기입", 15), ("위치", 13), ("메뉴 목록 엑셀", 0)],
+             [[f.target.sheet or "진단 시트", str(n), f.status + (f" {f.written}개" if f.written else ""), f.where or "-", name or "-"]
+              for f, n, name in done])
+    if isinstance(board, ExcelBoard) and board.current != board.src:
+        ui.ok(f"진단 엑셀: {board.out.resolve()}  " + ui.dim("(원본은 그대로)"))
+    if any(f.status == "붙여넣기 준비" for f, _, _ in done):
+        print("  " + ui.dim("붙여넣기 파일과 입력 내역(.tsv)은 결과 폴더에 있습니다."))
+
+
+def main(argv=None):
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
+    args = parse_args(argv)
+    if args.connect_google:
+        connect_google(True, force=True)
+        return
+    if args.from_result:
+        title("수집 결과 → 진단 시트 입력")
+        try:
+            menus = diag.menus_from_result(args.from_result)
+            unverified = diag.unverified_from_result(args.from_result)
+        except (ValueError, OSError) as exc:
+            sys.exit(f"수집 결과 파일을 읽을 수 없습니다: {exc}")
+        print(f"  수집 결과에서 진단 메뉴 {len(menus)}개를 읽었습니다.")
+        menus = choose_menus(menus, unverified, args, not args.yes)
+        fill_step(menus, args, not args.yes, Path(args.from_result).parent, diag.result_url(args.from_result))
+        return
+    if not args.url and not args.yes:
+        return campaign(args)
+    single_run(args)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ Safety rules
 - The source file is never overwritten.
 """
 import re
+from urllib.parse import urlsplit
 import shutil
 import tempfile
 import zipfile
@@ -133,7 +134,18 @@ def plan(path, sheet, menus):
     return p
 
 
-def _set_text(row, ref, text):
+def _column_styles(root):
+    """{column index: style id} from <cols>, used for cells that do not exist yet."""
+    out = {}
+    cols = root.find(M + "cols")
+    for c in (cols if cols is not None else []):
+        if c.get("style"):
+            for i in range(int(c.get("min")), int(c.get("max")) + 1):
+                out[i] = c.get("style")
+    return out
+
+
+def _set_text(row, ref, text, col_styles=None):
     col = CI(REF.match(ref).group(1))
     cell = None
     for c in row:
@@ -142,6 +154,9 @@ def _set_text(row, ref, text):
             break
     if cell is None:
         cell = etree.Element(M + "c", r=ref)
+        style = row.get("s") if row.get("customFormat") == "1" else (col_styles or {}).get(col)
+        if style:
+            cell.set("s", style)
         for i, c in enumerate(row):
             if CI(REF.match(c.get("r")).group(1)) > col:
                 row.insert(i, cell)
@@ -173,6 +188,7 @@ def write(src, dst, p: Plan):
         book = etree.fromstring(z.read("xl/workbook.xml"))
     rows = {int(r.get("r")): r for r in root.find(M + "sheetData")}
     sd = root.find(M + "sheetData")
+    col_styles = _column_styles(root)
     for r in MENU_ROWS:
         if r not in rows:
             new = etree.Element(M + "row", r=str(r))
@@ -182,7 +198,7 @@ def write(src, dst, p: Plan):
     for col, depths in p.to_write:
         for r, text in zip(MENU_ROWS, depths):
             if text:
-                _set_text(rows[r], f"{L(col)}{r}", text)
+                _set_text(rows[r], f"{L(col)}{r}", text, col_styles)
     # Excel recalculates every formula when the file opens (menu paths and counts depend on these cells).
     calc = book.find(M + "calcPr")
     if calc is None:
@@ -377,3 +393,125 @@ def paste_text(menus):
         v = clean(v)
         return "'" + v if v[:1] in ("=", "+", "-", "@") else v
     return "\r\n".join("\t".join(cell(m[i]) for m in menus) for i in range(3))
+
+
+# ---------- 진단 대상 목록 ----------
+
+@dataclass
+class Target:
+    """One 진단 대상 = one 진단 시트 (e.g. '01_사이트A')."""
+    sheet: str
+    name: str = ""
+    domain: str = ""
+    menus: int = 0
+    start: int = FIRST_COL        # first column after the last used one
+
+    @property
+    def no(self):
+        return self.sheet.split("_", 1)[0]
+
+    @property
+    def cell(self):
+        return f"{L(self.start)}13" if self.start <= LAST_COL else "칸 없음"
+
+
+def _domain(value):
+    value = clean(value)
+    if not value or value.startswith("예)") or value == "=formula" or " " in value or "." not in value:
+        return ""
+    return value if "://" in value else "https://" + value
+
+
+def targets(path):
+    """All 진단 시트 of a workbook with 진단 대상 name (D3), 대표 도메인 (D6) and current menu count."""
+    wb = Workbook(path)
+    out = []
+    with zipfile.ZipFile(wb.path) as z:
+        for sheet in wb.site_sheets():
+            root = etree.fromstring(z.read(wb.sheets[sheet]))
+            head, used, menus = {}, set(), set()
+            for c in root.iter(M + "c"):
+                col, row = REF.match(c.get("r")).groups()
+                ci, ri = CI(col), int(row)
+                if ci == 4 and ri in (3, 6):
+                    head[ri] = wb._value(c) or ""
+                elif FIRST_COL <= ci <= LAST_COL and (ri in MENU_ROWS or ri in RESULT_ROWS):
+                    if wb._value(c) not in (None, ""):
+                        used.add(ci)
+                        if ri in MENU_ROWS:
+                            menus.add(ci)
+            name = clean(head.get(3, ""))
+            if not name or name == "=formula" or name.startswith("예)"):
+                name = sheet.split("_", 1)[-1]
+            out.append(Target(sheet, name, _domain(head.get(6, "")), len(menus), max(used) + 1 if used else FIRST_COL))
+    return out
+
+
+def select_targets(text, items):
+    """'사이트A, 사이트B' / '전체' (also '01', '01-03') -> targets in the order typed. Numbers are the sheet number prefix."""
+    picked, errors = [], []
+    for token in [t.strip() for t in re.split(r"[,，]", text or "") if t.strip()]:
+        if token in {"전체", "all", "*"}:
+            found = list(items)
+        elif re.fullmatch(r"\d{1,3}\s*[-~]\s*\d{1,3}", token):
+            a, b = sorted(int(x) for x in re.split(r"\s*[-~]\s*", token))
+            found = [t for t in items if t.no.isdigit() and a <= int(t.no) <= b]
+        elif token.isdigit():
+            found = [t for t in items if t.no == token.zfill(2)]
+        else:
+            q = "".join(token.split()).lower()
+            exact = [t for t in items if q in {"".join(t.sheet.split()).lower(), "".join(t.name.split()).lower()}]
+            found = exact or [t for t in items if q in "".join((t.sheet + " " + t.name).split()).lower()]
+            if len(found) > 1:
+                errors.append(f"'{token}'에 해당하는 대상이 여러 개입니다: " + ", ".join(t.sheet for t in found[:6]))
+                continue
+        if not found:
+            errors.append(f"'{token}'에 해당하는 진단 시트가 없습니다.")
+        for t in found:
+            if t not in picked:
+                picked.append(t)
+    if errors:
+        raise ValueError("\n".join(errors))
+    return picked
+
+
+def _host_path(url):
+    parts = urlsplit(url if "://" in url else "https://" + url)
+    host = (parts.hostname or "").lower()
+    host = host[4:] if host.startswith("www.") else host
+    return host, parts.path.rstrip("/").lower()
+
+
+def match_url(url, items):
+    """진단 시트 whose 대표 도메인 (D6) matches the inspection URL: same host, then the longest common path."""
+    host, path = _host_path(url)
+    if not host:
+        return []
+    scored = []
+    for t in items:
+        if not t.domain:
+            continue
+        h, p = _host_path(t.domain)
+        if h != host:
+            continue
+        p = p.rsplit("/", 1)[0] if "." in p.rsplit("/", 1)[-1] else p   # /index.jsp -> site root
+        if path == p or path.startswith(p + "/") or not p:
+            scored.append((len(p), t))
+    if not scored:
+        return []
+    best = max(n for n, _ in scored)
+    return [t for n, t in scored if n == best]
+
+
+def result_url(path):
+    """시작 주소 from the 수집요약 sheet of a crawl result."""
+    from openpyxl import load_workbook
+    wb = load_workbook(path, read_only=True)
+    try:
+        if "수집요약" in wb.sheetnames:
+            for row in wb["수집요약"].iter_rows(values_only=True):
+                if row and row[0] == "시작 주소":
+                    return str(row[1] or "")
+    finally:
+        wb.close()
+    return ""

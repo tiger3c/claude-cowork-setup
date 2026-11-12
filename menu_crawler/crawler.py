@@ -36,8 +36,16 @@ class Crawler:
         self.phase = "after" if config.mode == "login" else "before"
         self.pw = self.browser = self.context = self.page = None
 
+    def ordered_menus(self):
+        """Tree order: menus stay grouped under their 1 Depth, then 2 Depth, in first-seen order."""
+        rank: dict[tuple, int] = {}
+        for menu in self.items.values():
+            for depth in range(1, len(menu.path) + 1):
+                rank.setdefault(tuple(menu.path[:depth]), len(rank))
+        return sorted(self.items.values(), key=lambda m: [rank[tuple(m.path[:d])] for d in range(1, len(m.path) + 1)])
+
     def snapshot(self):
-        self.report.menus = list(self.items.values())
+        self.report.menus = self.ordered_menus()
         result = self.report.to_dict()
         result["config"]["url"] = public_url(result["config"]["url"])
         result["current_url"] = public_url(result["current_url"])
@@ -147,14 +155,14 @@ class Crawler:
                     inherited.update(m.seen)
                     del self.items[key]
         # Prefer an actual navigation hierarchy over a duplicate generic page link.
-        if record.get("evidence") == "일반 링크":
+        if record.get("evidence") in {"일반 링크", "공통 링크"}:
             menus = [m for m in self.items.values() if m.url == url and m.evidence == "메뉴 DOM"]
             if menus:
                 self.mark_seen(menus)
                 return
         if record.get("evidence") == "메뉴 DOM" and url:
             for key, m in list(self.items.items()):
-                if m.url == url and m.evidence == "일반 링크":
+                if m.url == url and m.evidence in {"일반 링크", "공통 링크"}:
                     del self.items[key]
         key = tuple(path), url, source if kind == "dynamic" or review else ""
         if key in self.items:

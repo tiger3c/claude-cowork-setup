@@ -77,7 +77,9 @@ def make_workbook(report, selections=None):
     wb = Workbook()
     wb.remove(wb.active)
     counts = Counter(m["status"] for m in report["menus"])
-    needs = [m for m in report["menus"] if (not m["ready"] and m["kind"] != "group") or m["hierarchy_review"]]
+    # Header utility and footer links (terms, privacy, sign-up...) stay in 전체메뉴 but are not review work.
+    needs = [m for m in report["menus"] if m["evidence"] != "공통 링크"
+             and ((not m["ready"] and m["kind"] != "group") or m["hierarchy_review"])]
     mode = report["config"].get("mode", "public")
     compare = mode == "compare"
     visibility = Counter(m.get("visibility") or "" for m in report["menus"])

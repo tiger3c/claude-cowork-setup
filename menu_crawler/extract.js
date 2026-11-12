@@ -5,9 +5,21 @@
   for (let i = 0; i < roots.length; i++) {
     for (const el of roots[i].querySelectorAll("*")) if (el.shadowRoot) roots.push(el.shadowRoot);
   }
-  const navSelector = customSelector || "nav,[role=navigation],[role=menubar],[role=menu],.gnb,#gnb,.lnb,#lnb,.snb,#snb,.sitemap,#sitemap,[data-menu-root]";
+  const navSelector = customSelector || "nav,[role=navigation],[role=menubar],[role=menu],.gnb,#gnb,.lnb,#lnb,.snb,#snb,[class*=lnb],[class*=snb],.sitemap,#sitemap,[data-menu-root]";
   const crumbSelector = '.breadcrumb,.breadcrumbs,[aria-label*="breadcrumb" i],.location-path,[data-breadcrumb]';
   const isHome = value => /^(home|홈|메인|첫 화면)$/i.test(value);
+  // Side menus (LNB/SNB) usually show their parent as a heading instead of a nested list.
+  const sideSelector = '.lnb,#lnb,.snb,#snb,[class*="lnb"],[class*="snb"],[class*="side-menu"],[class*="sidemenu"],aside';
+  const commonSelector = 'footer,#footer,.footer,[class*="footer"],.util,#util,[class*="util"],.top-menu,.topmenu,[class*="family"]';
+  const hiddenHeading = el => /(?:^|\s)(?:blind|sr-only|screen_out|hide|hidden|skip|a11y|ir)(?:\s|$)/i.test(el.className || "")
+    || /^(?:주\s*메뉴|메인\s*메뉴|전체\s*메뉴|메뉴|navigation|main menu|menu|global navigation)$/i.test(clean(el.textContent));
+  const sideTitle = nav => {
+    const side = nav.closest(sideSelector);
+    if (!side) return "";
+    const heading = side.querySelector("h1,h2,h3,h4,.title,.tit,[class*='title'],[class*='tit']");
+    if (!heading || heading.closest("li") || hiddenHeading(heading)) return "";
+    return clean(heading.textContent);
+  };
   let breadcrumbs = [];
   const crumb = document.querySelector(crumbSelector);
   if (crumb) {
@@ -25,6 +37,8 @@
       const nav = el.closest(navSelector);
       const raw = el.getAttribute("href") || el.getAttribute("data-href") || el.getAttribute("data-url") || "";
       if (!nav && !raw) continue;
+      // In-page anchors (#content, #top, skip links) are not menus. SPA routes (#/x, #!/x) are.
+      if (/^#[^/!]/.test(raw) && !el.getAttribute("onclick")) continue;
       const label = name(el);
       if (!label) { unnamed++; continue; }
       const leaf = el.closest('li,[role="treeitem"]');
@@ -53,6 +67,10 @@
         const owner = [...root.querySelectorAll("[aria-controls]")].find(x => x.getAttribute("aria-controls") === nav.id);
         if (owner && owner !== el) { const text = name(owner); if (text && text !== label) ancestors.push(text); }
       }
+      if (nav && ancestors.length === 0) {
+        const parent = sideTitle(nav);
+        if (parent && parent !== label) ancestors.push(parent);
+      }
       let destination = raw;
       if (!raw || raw === "#" || /^javascript:/i.test(raw)) {
         const script = (el.getAttribute("onclick") || "") + " " + raw;
@@ -62,8 +80,10 @@
       if (/^(mailto|tel|sms):/i.test(destination)) continue;
       let url = "";
       try { if (destination) { const u = new URL(destination, document.baseURI); if (/^https?:$/.test(u.protocol)) url = u.href; } } catch {}
-      const path = nav ? [...ancestors, label] : [...breadcrumbs, label];
-      records.push({ path, url, label, kind: !url && children ? "group" : !url ? "dynamic" : "link", evidence: nav ? "메뉴 DOM" : breadcrumbs.length ? "본문 링크·현재 경로" : "일반 링크", hierarchy_review: !nav });
+      const common = !nav && el.closest(commonSelector);
+      const path = nav || common ? [...ancestors, label] : [...breadcrumbs, label];
+      const evidence = nav ? "메뉴 DOM" : common ? "공통 링크" : breadcrumbs.length ? "본문 링크·현재 경로" : "일반 링크";
+      records.push({ path, url, label, kind: !url && children ? "group" : !url ? "dynamic" : "link", evidence, hierarchy_review: !nav });
     }
   }
   return {

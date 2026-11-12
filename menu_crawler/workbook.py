@@ -292,3 +292,38 @@ def unverified_from_result(path):
                 out.append(([clean(row[col[k]]) for k in ("1 Depth", "2 Depth", "3 Depth")], row[col["수집 상태"]]))
     wb.close()
     return out
+
+
+def resolve_sheet(book, query):
+    """Exact name, then the number prefix ('06' -> '06_...'), then a unique part of the name."""
+    names = book.site_sheets()
+    if query in book.sheets:
+        return query
+    q = query.strip()
+    by_number = [n for n in names if n.split("_", 1)[0] == q.zfill(2)] if q.isdigit() else []
+    if len(by_number) == 1:
+        return by_number[0]
+    partial = [n for n in names if q.lower() in n.lower()]
+    if len(partial) == 1:
+        return partial[0]
+    if not partial and not by_number:
+        raise ValueError(f"'{query}'에 해당하는 진단 시트가 없습니다.")
+    raise ValueError(f"'{query}'에 해당하는 진단 시트가 여러 개입니다: {', '.join((by_number or partial)[:8])}")
+
+
+def sheet_summary(book, sheet):
+    """(existing menu columns, free columns) of a diagnosis sheet."""
+    grid = book.grid(sheet)
+    used = {c for c, _ in grid}
+    menus = {c for c, r in grid if r in MENU_ROWS}
+    return len(menus), (LAST_COL - FIRST_COL + 1) - len(used)
+
+
+def receipt(p, path):
+    """Tab-separated record of what was written, skipped as duplicate, or left out for lack of columns."""
+    lines = ["구분\t열\t1 Depth\t2 Depth\t3 Depth"]
+    lines += [f"입력\t{L(c)}\t" + "\t".join(d) for c, d in p.to_write]
+    lines += ["이미 있음\t\t" + "\t".join(d) for d in p.duplicates]
+    lines += ["칸 부족\t\t" + "\t".join(d) for d in p.overflow]
+    Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
+    return Path(path)

@@ -117,3 +117,19 @@ def test_unverified_navigation_menus_can_be_included(tmp_path):
               "--workbook-out", str(out), "--include-unverified", "-y"])
     ws = load_workbook(out)["02_빈시트"]
     assert [ws["H13"].value, ws["I13"].value, ws["J13"].value] == ["조회", "마이페이지", None]
+
+
+def test_sheet_lookup_summary_and_receipt(tmp_path):
+    book = diagnosis_book(tmp_path / "diag.xlsx")
+    wb = diag.Workbook(book)
+    assert diag.resolve_sheet(wb, "1") == "01_테스트"
+    assert diag.resolve_sheet(wb, "빈시트") == "02_빈시트"
+    with pytest.raises(ValueError):
+        diag.resolve_sheet(wb, "_")                      # matches both
+    with pytest.raises(ValueError):
+        diag.resolve_sheet(wb, "없는시트")
+    assert diag.sheet_summary(wb, "01_테스트") == (1, 248)   # H has a menu, I has only a result
+    p = diag.plan(book, "01_테스트", [["기존", "하위"], ["조회"]] + [[f"m{i}"] for i in range(250)])
+    rec = diag.receipt(p, tmp_path / "r.tsv").read_text(encoding="utf-8-sig").splitlines()
+    assert rec[0].startswith("구분") and rec[1] == "입력\tJ\t조회\t\t"
+    assert sum(1 for x in rec if x.startswith("이미 있음")) == 1 and sum(1 for x in rec if x.startswith("칸 부족")) == 3

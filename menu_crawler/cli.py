@@ -481,7 +481,7 @@ def workbook_step(menus, args, interactive):
     if not path:
         if not interactive or not ask_yes("진단 엑셀의 진단 시트에 메뉴를 바로 입력할까요?", False):
             return None
-        path = ask_path("  진단 엑셀(.xlsx) 경로")
+        path = ask_path("  진단 엑셀(.xlsx/.xlsm) 경로")
         if not path:
             return None
     book = diag.Workbook(path)
@@ -491,16 +491,20 @@ def workbook_step(menus, args, interactive):
         if not interactive:
             sys.exit("--sheet 로 진단 시트 이름을 지정하세요. 예: --sheet 01_사이트A")
         print()
+        print("  번호) 진단 시트                     기존 메뉴 / 빈 칸")
         for i, name in enumerate(sheets, 1):
-            print(f"  {i:2}) {name}")
+            menus_n, free_n = diag.sheet_summary(book, name)
+            print(f"  {i:3}) {name[:28]:30} {menus_n:5} / {free_n}")
         while True:
             pick = ask("  메뉴를 넣을 진단 시트 번호")
             if pick.isdigit() and 1 <= int(pick) <= len(sheets):
                 sheet = sheets[int(pick) - 1]
                 break
             print("  목록의 번호를 입력하세요.")
-    if sheet not in book.sheets:
-        sys.exit(f"진단 엑셀에 '{sheet}' 시트가 없습니다.")
+    try:
+        sheet = diag.resolve_sheet(book, sheet)
+    except ValueError as exc:
+        sys.exit(str(exc))
     p = diag.plan(path, sheet, menus)
     title(f"진단 시트 입력 · {sheet}")
     print(f"  시트에 이미 있는 메뉴 {p.existing}개 · 비어 있는 열 {len(p.free_columns)}개")
@@ -511,6 +515,11 @@ def workbook_step(menus, args, interactive):
     if not p.to_write:
         print("  입력할 새 메뉴가 없습니다.")
         return None
+    print()
+    for col, depths in p.to_write[:5]:
+        print(f"    {diag.L(col):>3}열  " + " > ".join(d for d in depths if d))
+    if len(p.to_write) > 5:
+        print(f"    … 외 {len(p.to_write) - 5}개")
     src = Path(path)
     dst = Path(args.workbook_out) if args.workbook_out else src.with_name(f"{src.stem}_메뉴입력_{datetime.now():%Y%m%d_%H%M%S}{src.suffix}")
     if interactive and not ask_yes(f"  '{dst.name}' 파일로 저장할까요? (원본은 그대로 둡니다)", True):
@@ -518,10 +527,12 @@ def workbook_step(menus, args, interactive):
         return None
     out = diag.write(src, dst, p)
     print(f"  ✔ 저장: {out.resolve()}")
+    rec = diag.receipt(p, out.with_name(out.stem + "_입력내역.tsv"))
+    print(f"  입력 내역: {rec.resolve()}")
     if p.overflow:
-        left = out.with_name(out.stem + "_미입력메뉴.tsv")
-        left.write_text("\n".join("\t".join(d) for d in p.overflow) + "\n", encoding="utf-8")
-        print(f"  ※ 칸이 부족해 넣지 못한 메뉴 {len(p.overflow)}개: {left.resolve()}")
+        print(f"  ※ 칸이 부족해 넣지 못한 메뉴 {len(p.overflow)}개는 입력 내역 파일에 '칸 부족'으로 남겼습니다.")
+    if os.name == "nt" and interactive and not args.no_open and ask_yes("  저장한 진단 엑셀을 열까요?", False):
+        os.startfile(out)  # noqa: S606 - Windows only, local file the user just created
     return out
 
 
@@ -546,16 +557,16 @@ def main(argv=None):
             pass
     args = parse_args(argv)
     if args.from_result:
+        title("수집 결과 → 진단 시트 입력")
         try:
             menus = diag.menus_from_result(args.from_result)
             unverified = diag.unverified_from_result(args.from_result)
         except (ValueError, OSError) as exc:
             sys.exit(f"수집 결과 파일을 읽을 수 없습니다: {exc}")
+        print(f"  수집 결과에서 진단 메뉴 {len(menus)}개를 읽었습니다.")
         menus = choose_menus(menus, unverified, args, not args.yes)
-        title("수집 결과 → 진단 시트 입력")
-        print(f"  수집 결과에서 메뉴 {len(menus)}개를 읽었습니다.")
         if not args.workbook:
-            args.workbook = ask_path("  진단 엑셀(.xlsx) 경로") if not args.yes else ""
+            args.workbook = ask_path("  진단 엑셀(.xlsx/.xlsm) 경로") if not args.yes else ""
             if not args.workbook:
                 sys.exit("--workbook 으로 진단 엑셀 경로를 지정하세요.")
         workbook_step(menus, args, not args.yes)

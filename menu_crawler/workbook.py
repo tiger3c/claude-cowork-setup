@@ -9,6 +9,7 @@ Safety rules
 - Menus whose path already exists on the sheet are skipped.
 - The source file is never overwritten.
 """
+import posixpath
 import re
 from urllib.parse import urlsplit
 import shutil
@@ -29,8 +30,9 @@ XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 FIRST_COL, LAST_COL = CI("H"), CI("IW")          # 250 menu columns
 MENU_ROWS = (13, 14, 15)                          # 1 / 2 / 3 Depth
 RESULT_ROWS = range(20, 68)                       # 48 evaluation items
-SITE_SHEET = re.compile(r"^\d\d_")
-REF = re.compile(r"([A-Z]+)(\d+)$")
+SITE_SHEET = re.compile(r"^\d{2,3}_")
+REF = re.compile(r"^([A-Za-z]{1,3})(\d+)$")
+MARKERS = {"=formula", "=merged"}                 # occupied cells without a usable text
 
 
 @dataclass
@@ -53,53 +55,144 @@ class Workbook:
             self.names = z.namelist()
             wb = etree.fromstring(z.read("xl/workbook.xml"))
             rels = etree.fromstring(z.read("xl/_rels/workbook.xml.rels"))
-            target = {r.get("Id"): r.get("Target") for r in rels}
-            self.sheets = {}
+            target = {r.get("Id"): r.get("Target") for r in rels if isinstance(r.tag, str)}
+            self.sheets, self.hidden = {}, set()
             for s in wb.iter(M + "sheet"):
-                t = target[s.get("{%s}id" % RNS)].lstrip("/")
-                self.sheets[s.get("name")] = t if t.startswith("xl/") else "xl/" + t
+                self.sheets[s.get("name")] = _part(target[s.get("{%s}id" % RNS)])
+                if s.get("state") in {"hidden", "veryHidden"}:
+                    self.hidden.add(s.get("name"))
             self.shared = []
             if "xl/sharedStrings.xml" in self.names:
                 sst = etree.fromstring(z.read("xl/sharedStrings.xml"))
-                self.shared = ["".join(si.itertext()) for si in sst.iter(M + "si")]
+                self.shared = [_text_of(si) for si in sst.iter(M + "si")]
 
     def site_sheets(self):
-        return [n for n in self.sheets if SITE_SHEET.match(n) and n != "00_Sample"]
+        return [n for n in self.sheets if SITE_SHEET.match(n) and n.lower() != "00_sample" and n not in self.hidden]
 
-    def grid(self, sheet):
-        """{(col, row): text-or-formula-marker} for the menu and result area."""
+    def root(self, sheet):
         with zipfile.ZipFile(self.path) as z:
-            root = etree.fromstring(z.read(self.sheets[sheet]))
+            return etree.fromstring(z.read(self.sheets[sheet]))
+
+    def grid(self, sheet, root=None):
+        """{(col, row): text} for the menu and result area. Formula cells give their cached text or '=formula';
+        cells inside an array/shared formula range or an empty merge are '=merged'/'=formula' (occupied)."""
+        root = self.root(sheet) if root is None else root
         out = {}
-        for c in root.iter(M + "c"):
-            col, row = REF.match(c.get("r")).groups()
-            ci, ri = CI(col), int(row)
-            if not (FIRST_COL <= ci <= LAST_COL and (ri in MENU_ROWS or ri in RESULT_ROWS)):
+        area = lambda ci, ri: FIRST_COL <= ci <= LAST_COL and (ri in MENU_ROWS or ri in RESULT_ROWS)  # noqa: E731
+        for c, ci, ri in cells(root):
+            f = c.find(M + "f")
+            if f is not None and f.get("ref") and f.get("t") in {"array", "shared"}:
+                for cc, rr in _span(f.get("ref")):
+                    if area(cc, rr):
+                        out.setdefault((cc, rr), "=formula")
+            if not area(ci, ri):
                 continue
             value = self._value(c)
             if value not in (None, ""):
                 out[(ci, ri)] = value
+        for (c1, r1), (c2, r2) in merges(root):
+            anchor = out.get((c1, r1), "")
+            for cc in range(c1, c2 + 1):
+                for rr in range(r1, r2 + 1):
+                    if area(cc, rr) and (cc, rr) != (c1, r1):
+                        out[(cc, rr)] = anchor if anchor not in ("", None) else "=merged"
+            if area(c1, r1) and (c1, r1) not in out and (c2 > c1 or r2 > r1):
+                out[(c1, r1)] = "=merged"
         return out
 
     def _value(self, c):
-        if c.find(M + "f") is not None:
-            return "=formula"
+        """Cached text of a cell; '=formula' for a formula without a cached value."""
+        text = self.text(c)
+        if text:
+            return text
+        return "=formula" if c.find(M + "f") is not None else None
+
+    def text(self, c):
         if c.get("t") == "inlineStr":
-            return "".join(c.find(M + "is").itertext())
+            node = c.find(M + "is")
+            return _text_of(node) if node is not None else ""
         v = c.find(M + "v")
-        if v is None:
-            return None
+        if v is None or v.text is None:
+            return ""
         if c.get("t") == "s":
-            return self.shared[int(v.text)]
+            try:
+                return self.shared[int(v.text)]
+            except (ValueError, IndexError):
+                return ""
         return v.text
+
+
+def _part(target):
+    """Workbook rels Target -> zip part name ('worksheets/s1.xml', '/xl/worksheets/s1.xml', './worksheets/..')."""
+    return target.lstrip("/") if target.startswith("/") else posixpath.normpath(posixpath.join("xl", target))
+
+
+def _text_of(node):
+    """Text of <si>/<is>: plain or rich-text runs, without phonetic (rPh) readings."""
+    return "".join(t.text or "" for t in node.iter(M + "t") if t.getparent().tag != M + "rPh")
+
+
+def cells(root):
+    """(cell, col, row) for every cell; a missing or lower-case r is derived from the position (allowed by the spec)."""
+    sd = root.find(M + "sheetData")
+    rnum = 0
+    for row in (sd if sd is not None else []):
+        if row.tag != M + "row":
+            continue
+        rnum = int(row.get("r")) if (row.get("r") or "").isdigit() else rnum + 1
+        cnum = 0
+        for c in row:
+            if c.tag != M + "c":
+                continue
+            m = REF.match(c.get("r") or "")
+            cnum = CI(m.group(1).upper()) if m else cnum + 1
+            yield c, cnum, (int(m.group(2)) if m else rnum)
+
+
+def _span(ref):
+    a, _, b = ref.partition(":")
+    ma, mb = REF.match(a), REF.match(b or a)
+    if not ma or not mb:
+        return []
+    c1, r1, c2, r2 = CI(ma.group(1).upper()), int(ma.group(2)), CI(mb.group(1).upper()), int(mb.group(2))
+    return [(c, r) for c in range(c1, min(c2, LAST_COL + 1) + 1) for r in range(r1, min(r2, 80) + 1)]
+
+
+def merges(root):
+    out = []
+    for m in root.iter(M + "mergeCell"):
+        a, _, b = (m.get("ref") or "").partition(":")
+        ma, mb = REF.match(a), REF.match(b or a)
+        if ma and mb:
+            out.append(((CI(ma.group(1).upper()), int(ma.group(2))), (CI(mb.group(1).upper()), int(mb.group(2)))))
+    return out
+
+
+def hidden_columns(root):
+    out = set()
+    cols = root.find(M + "cols")
+    for c in (cols if cols is not None else []):
+        if c.tag == M + "col" and (c.get("hidden") in {"1", "true"} or c.get("width") in {"0", "0.0"}):
+            out.update(range(int(c.get("min")), int(c.get("max")) + 1))
+    return out
 
 
 CONTROL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ud800-\udfff\ufffe\uffff]")
 
 
-def clean(text):
-    """One line, at most 240 characters, and only characters an xlsx file can hold."""
-    return " ".join(CONTROL.sub(" ", str(text or "")).split())[:240]
+def clean(text, limit=240):
+    """One line, at most `limit` characters, and only characters an xlsx file can hold."""
+    return " ".join(CONTROL.sub(" ", str(text or "")).split())[:limit]
+
+
+def menu_keys(grid):
+    """Menu paths already on a sheet (merged 1 Depth labels are copied to the columns they cover)."""
+    keys = set()
+    for col in {c for c, _ in grid}:
+        key = tuple("" if grid.get((col, r), "") in MARKERS else clean(grid.get((col, r), "")) for r in MENU_ROWS)
+        if any(key):
+            keys.add(key)
+    return keys
 
 
 def plan(path, sheet, menus):
@@ -107,16 +200,14 @@ def plan(path, sheet, menus):
     wb = Workbook(path)
     if sheet not in wb.sheets:
         raise ValueError(f"시트를 찾을 수 없습니다: {sheet}")
-    grid = wb.grid(sheet)
+    root = wb.root(sheet)
+    grid = wb.grid(sheet, root)
     used = {col for col, _ in grid}
-    existing = set()
-    for col in used:
-        path_ = tuple(clean(grid.get((col, r), "")) for r in MENU_ROWS)
-        if any(path_):
-            existing.add(path_)
+    existing = menu_keys(grid)
     # Like the Google Sheets backends: new menus continue after the last used column, never into gaps
-    # (a gap may be left empty on purpose and would break the menu order).
-    free = list(range(max(used) + 1 if used else FIRST_COL, LAST_COL + 1))
+    # (a gap may be left empty on purpose and would break the menu order). Hidden columns are skipped.
+    hidden = hidden_columns(root)
+    free = [c for c in range(max(used) + 1 if used else FIRST_COL, LAST_COL + 1) if c not in hidden]
     p = Plan(sheet, free, len(existing))
     slots = iter(free)
     seen = set()
@@ -150,22 +241,20 @@ def _column_styles(root):
 
 def _set_text(row, ref, text, col_styles=None):
     col = CI(REF.match(ref).group(1))
-    cell = None
-    for c in row:
-        if c.get("r") == ref:
-            cell = c
-            break
+    cells_ = [c for c in row if c.tag == M + "c"]
+    cell = next((c for c in cells_ if c.get("r") == ref), None)
     if cell is None:
         cell = etree.Element(M + "c", r=ref)
-        style = row.get("s") if row.get("customFormat") == "1" else (col_styles or {}).get(col)
+        style = row.get("s") if row.get("customFormat") in {"1", "true"} else (col_styles or {}).get(col)
         if style:
             cell.set("s", style)
-        for i, c in enumerate(row):
-            if CI(REF.match(c.get("r")).group(1)) > col:
-                row.insert(i, cell)
-                break
+        after = next((c for c in cells_ if CI(REF.match(c.get("r")).group(1)) > col), None)
+        if after is not None:
+            after.addprevious(cell)
+        elif cells_:
+            cells_[-1].addnext(cell)          # before a trailing <extLst>
         else:
-            row.append(cell)
+            row.insert(0, cell)
         row.attrib.pop("spans", None)
     for child in list(cell):
         cell.remove(child)
@@ -179,6 +268,34 @@ def _set_text(row, ref, text, col_styles=None):
     t.set(XML_SPACE, "preserve")
 
 
+def _normalize(sd):
+    """Give every row and cell an explicit upper-case r (same meaning, needed to edit by reference)."""
+    rnum = 0
+    for row in sd:
+        if row.tag != M + "row":
+            continue
+        rnum = int(row.get("r")) if (row.get("r") or "").isdigit() else rnum + 1
+        row.set("r", str(rnum))
+        cnum = 0
+        for c in row:
+            if c.tag != M + "c":
+                continue
+            m = REF.match(c.get("r") or "")
+            cnum = CI(m.group(1).upper()) if m else cnum + 1
+            c.set("r", f"{L(cnum)}{rnum}")
+
+
+def _grow_dimension(root, refs):
+    dim = root.find(M + "dimension")
+    if dim is None or not refs:
+        return
+    span = [(CI(m.group(1).upper()), int(m.group(2))) for m in (REF.match(x) for x in (dim.get("ref") or "").split(":")) if m]
+    pts = span + [(CI(REF.match(r).group(1)), int(REF.match(r).group(2))) for r in refs]
+    c1, r1 = min(c for c, _ in pts), min(r for _, r in pts)
+    c2, r2 = max(c for c, _ in pts), max(r for _, r in pts)
+    dim.set("ref", f"{L(c1)}{r1}:{L(c2)}{r2}")
+
+
 def write(src, dst, p: Plan):
     """Write the plan into a copy of src saved as dst. Only the target sheet and workbook.xml change."""
     src, dst = Path(src), Path(dst)
@@ -189,22 +306,27 @@ def write(src, dst, p: Plan):
     with zipfile.ZipFile(src) as z:
         root = etree.fromstring(z.read(sheet_part))
         book = etree.fromstring(z.read("xl/workbook.xml"))
-    rows = {int(r.get("r")): r for r in root.find(M + "sheetData")}
     sd = root.find(M + "sheetData")
+    _normalize(sd)
+    rows = {int(r.get("r")): r for r in sd if r.tag == M + "row"}
     col_styles = _column_styles(root)
     extra_rows = sorted({int(REF.match(ref).group(2)) for ref in p.cells})
     for r in (*MENU_ROWS, *extra_rows):
         if r not in rows:
             new = etree.Element(M + "row", r=str(r))
-            after = [x for x in sd if int(x.get("r")) < r]
+            after = [x for x in sd if x.tag == M + "row" and int(x.get("r")) < r]
             (after[-1].addnext(new) if after else sd.insert(0, new))
             rows[r] = new
+    written = []
     for col, depths in p.to_write:
         for r, text in zip(MENU_ROWS, depths):
             if text:
                 _set_text(rows[r], f"{L(col)}{r}", text, col_styles)
+                written.append(f"{L(col)}{r}")
     for ref, text in p.cells.items():
-        _set_text(rows[int(REF.match(ref).group(2))], ref, clean(text), col_styles)
+        _set_text(rows[int(REF.match(ref).group(2))], ref, clean(text, 2000), col_styles)
+        written.append(ref)
+    _grow_dimension(root, written)
     # Excel recalculates every formula when the file opens (menu paths and counts depend on these cells).
     calc = book.find(M + "calcPr")
     if calc is None:
@@ -228,7 +350,7 @@ def write(src, dst, p: Plan):
                 elif item.filename == "xl/calcChain.xml":
                     continue  # stale after edits; Excel rebuilds it
                 else:
-                    zout.writestr(item, zin.read(item.filename))
+                    zout.writestr(item, zin.read(item))
         if "xl/calcChain.xml" in wb.names:
             _drop_calc_chain(tmp_path)
         _verify(tmp_path, p)
@@ -255,11 +377,15 @@ def _verify(path, p):
 
 
 def cell_values(path, sheet, refs):
-    """{ref: text} for a few cells of one sheet."""
+    """{ref: text} for a few cells of one sheet (cached text for formulas, '=formula' without one)."""
     wb = Workbook(path)
-    with zipfile.ZipFile(wb.path) as z:
-        root = etree.fromstring(z.read(wb.sheets[sheet]))
-    return {c.get("r"): clean(wb._value(c) or "") for c in root.iter(M + "c") if c.get("r") in refs}
+    return {f"{L(ci)}{ri}": clean(wb._value(c) or "", 2000) for c, ci, ri in cells(wb.root(sheet)) if f"{L(ci)}{ri}" in refs}
+
+
+def next_column(grid, root):
+    used = {c for c, _ in grid}
+    hidden = hidden_columns(root)
+    return next((c for c in range(max(used) + 1 if used else FIRST_COL, LAST_COL + 1) if c not in hidden), LAST_COL + 1)
 
 
 def _drop_calc_chain(path):
@@ -267,9 +393,14 @@ def _drop_calc_chain(path):
     tmp = path.with_suffix(".tmp")
     with zipfile.ZipFile(path) as zin, zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
         for item in zin.infolist():
-            data = zin.read(item.filename)
+            data = zin.read(item)
             if item.filename in ("[Content_Types].xml", "xl/_rels/workbook.xml.rels"):
-                data = re.sub(rb"<(Override|Relationship)[^>]*calcChain[^>]*/>", b"", data)
+                root = etree.fromstring(data)
+                for e in list(root):
+                    ref = e.get("PartName") or e.get("Target") or ""
+                    if isinstance(e.tag, str) and posixpath.basename(ref).lower() == "calcchain.xml":
+                        root.remove(e)
+                data = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
             zout.writestr(item, data)
     shutil.move(str(tmp), path)
 
@@ -383,14 +514,13 @@ def plan_paste(snapshot, sheet, menus, prior=None):
     existing, start = set(prior["keys"]) if prior else set(), prior["start"] if prior else FIRST_COL
     if snapshot:
         wb = Workbook(snapshot)
-        grid = wb.grid(sheet)
-        used = {c for c, _ in grid}
-        if used:
-            start = max(start, max(used) + 1)
-        for col in used:
-            key = tuple(clean(grid.get((col, r), "")) for r in MENU_ROWS)
-            if any(key):
-                existing.add(key)
+        if sheet not in wb.sheets:
+            raise ValueError(f"내려받은 파일에 '{sheet}' 시트가 없습니다.")
+        root = wb.root(sheet)
+        grid = wb.grid(sheet, root)
+        if grid:
+            start = max(start, next_column(grid, root))
+        existing |= menu_keys(grid)
     new, dup, seen = [], [], set()
     for menu in menus:
         depths = [clean(x) for x in (list(menu) + ["", "", ""])[:3]]
@@ -406,11 +536,15 @@ def plan_paste(snapshot, sheet, menus, prior=None):
     return PastePlan(start, new[:room], dup, new[room:], len(existing), bool(snapshot))
 
 
+NUMBERISH = re.compile(r"^[\d\s.,:/()%+\-]+$")
+
+
 def paste_text(menus):
     """3 rows (1/2/3 Depth) x N columns, tab separated; values never start a formula in Sheets."""
     def cell(v):
         v = clean(v)
-        return "'" + v if v[:1] in ("=", "+", "-", "@") else v
+        # ' keeps the text as typed: no formula, and no number/date conversion of names like 1-2, 0012, 3/4
+        return "'" + v if v[:1] in ("=", "+", "-", "@", "'", '"') or NUMBERISH.match(v) else v
     return "\r\n".join("\t".join(cell(m[i]) for m in menus) for i in range(3))
 
 
@@ -484,25 +618,16 @@ def targets(path):
     """All 진단 시트 of a workbook with 진단 대상 name (D3), 대표 도메인 (D6) and current menu count."""
     wb = Workbook(path)
     out = []
-    with zipfile.ZipFile(wb.path) as z:
-        for sheet in wb.site_sheets():
-            root = etree.fromstring(z.read(wb.sheets[sheet]))
-            head, used, menus = {}, set(), set()
-            for c in root.iter(M + "c"):
-                col, row = REF.match(c.get("r")).groups()
-                ci, ri = CI(col), int(row)
-                if ci == 4 and ri in (3, 6):
-                    head[ri] = wb._value(c) or ""
-                elif FIRST_COL <= ci <= LAST_COL and (ri in MENU_ROWS or ri in RESULT_ROWS):
-                    if wb._value(c) not in (None, ""):
-                        used.add(ci)
-                        if ri in MENU_ROWS:
-                            menus.add(ci)
-            name = clean(head.get(3, ""))
-            if not name or name == "=formula" or name.startswith("예)"):
-                name = sheet.split("_", 1)[-1]
-            out.append(Target(sheet, name, _domain(head.get(6, "")), len(menus), max(used) + 1 if used else FIRST_COL,
-                              clean(head.get(6, ""))))
+    for sheet in wb.site_sheets():
+        root = wb.root(sheet)
+        head = {ri: wb._value(c) or "" for c, ci, ri in cells(root) if ci == 4 and ri in (3, 6)}
+        grid = wb.grid(sheet, root)
+        menus = {c for (c, r), v in grid.items() if r in MENU_ROWS and v not in MARKERS}
+        name = clean(head.get(3, ""))
+        if not name or name in MARKERS or name.startswith("예)"):
+            name = sheet.split("_", 1)[-1]
+        d6 = clean(head.get(6, ""), 2000)
+        out.append(Target(sheet, name, _domain(d6), len(menus), next_column(grid, root), "" if d6 in MARKERS else d6))
     return out
 
 
@@ -535,13 +660,19 @@ def select_targets(text, items):
 
 
 def _host_path(url):
-    parts = urlsplit(url if "://" in url else "https://" + url)
+    try:
+        parts = urlsplit(url if "://" in url else "https://" + url)
+        port = parts.port
+    except ValueError:
+        return "", ""
     host = (parts.hostname or "").lower().rstrip(".")
     try:
         host = host.encode("idna").decode("ascii")      # 정부.한국 == xn--or3bn7q.xn--3e0b707e
     except UnicodeError:
         pass
     host = host[4:] if host.startswith("www.") else host
+    if port and (parts.scheme.lower(), port) not in {("https", 443), ("http", 80)}:
+        host += f":{port}"                                  # a.com:8080 is another service than a.com
     return host, parts.path.rstrip("/").lower()
 
 

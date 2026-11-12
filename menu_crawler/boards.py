@@ -141,6 +141,10 @@ class ExcelBoard:
     def __init__(self, path, out=""):
         self.src = Path(path)
         self.out = Path(out) if out else self.src.with_name(f"{self.src.stem}_메뉴입력_{datetime.now():%Y%m%d_%H%M%S}{self.src.suffix}")
+        if self.out.suffix.lower() != self.src.suffix.lower():      # .xlsm content must keep .xlsm
+            self.out = self.out.with_suffix(self.src.suffix)
+        if self.out.resolve() == self.src.resolve() or (self.out.exists() and os.path.samefile(self.out, self.src)):
+            raise ValueError("결과 파일을 원본과 같은 파일로 지정할 수 없습니다. 원본은 그대로 두고 새 파일로 저장합니다.")
         self.current = self.src
         self.label = f"엑셀 파일 · {self.src.name} → {self.out.name}"
 

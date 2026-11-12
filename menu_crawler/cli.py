@@ -460,7 +460,7 @@ def choose_board(args, interactive):
         try:
             board = ExcelBoard(path, args.workbook_out)
             count = len(board.targets())
-        except (OSError, KeyError, ValueError, zipfile.BadZipFile) as exc:
+        except Exception as exc:  # noqa: BLE001 - any unreadable workbook: say so and ask again
             if not interactive:
                 sys.exit(f"진단 엑셀을 읽을 수 없습니다: {exc}")
             ui.fail(f"진단 엑셀을 읽을 수 없습니다: {exc}")
@@ -559,8 +559,12 @@ def fill_step(menus, args, interactive, out_dir, url=""):
         return None
     target = choose_targets(board, args, interactive, url=url)[0]
     print()
-    print("  " + ui.bold(f"▶ {target.sheet or '진단 시트'}"))
-    return board.fill(target, menus, interactive, out_dir)
+    print("  " + ui.bold(f"> {target.sheet or '진단 시트'}"))
+    try:
+        return board.fill(target, menus, interactive, out_dir)
+    except Exception as exc:  # noqa: BLE001 - report instead of a traceback; the crawl result is already saved
+        ui.fail(f"기입하지 못했습니다: {type(exc).__name__}: {exc}")
+        return Filled(target, "실패")
 
 
 def parse_args(argv=None):
@@ -726,8 +730,8 @@ def campaign(args):
         for i, (t, url, login_url) in enumerate(plan, 1):
             try:
                 done.append(run_target(i, len(plan), t, url, login_url, mode, settings, board, args))
-            except (OSError, RuntimeError, ValueError, SheetError, zipfile.BadZipFile) as exc:
-                ui.fail(f"{t.sheet or '진단 시트'} 처리 중 오류: {exc}")
+            except Exception as exc:  # noqa: BLE001 - one broken target must not stop the others
+                ui.fail(f"{t.sheet or '진단 시트'} 처리 중 오류: {type(exc).__name__}: {exc}")
                 done.append((Filled(t, "실패"), 0, ""))
             if i < len(plan) and not ask_yes(f"  다음 대상 {plan[i][0].sheet or '진단 시트'} 수집을 시작할까요?", True):
                 break

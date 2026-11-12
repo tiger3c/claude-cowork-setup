@@ -107,7 +107,8 @@ class PasteBoard:
             return Filled(target, "새 메뉴 없음", duplicates=len(p.duplicates), overflow=len(p.overflow))
         if not p.checked:
             print(f"  붙여넣을 메뉴 {len(p.menus)}개")
-            ui.note("메뉴가 없는 빈 진단 시트에만 붙여넣으세요. 메뉴가 있는 시트라면 구글 시트를 .xlsx로 내려받아 지정하면 이어 붙일 칸을 계산합니다.")
+            ui.note("메뉴가 없는 빈 진단 시트에만 붙여넣으세요.")
+            ui.say(ui.dim("메뉴가 있는 시트라면 구글 시트를 .xlsx로 내려받아 지정하면 이어 붙일 칸을 계산합니다."))
         where = _range(p.start, p.start + len(p.menus) - 1)
         cell = f"{diag.L(p.start)}13"
         self.seq += 1

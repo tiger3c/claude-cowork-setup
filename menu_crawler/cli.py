@@ -13,7 +13,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import zipfile
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -79,7 +78,7 @@ def ask_mode(initial, default="1"):
     print()
     print("  수집 방식을 선택하세요.")
     for key, mode in MODE_KEYS.items():
-        print(f"    {key}) {MODES[mode]:<16} - {MODE_HELP[mode]}")
+        print(f"    {key}) {ui.fit(MODES[mode], 22)} - {MODE_HELP[mode]}")
     while True:
         value = ask("  번호", default)
         if value in MODE_KEYS:
@@ -244,7 +243,7 @@ def summary(data):
     title("수집 결과")
     menus = data["menus"]
     ready = sum(m["ready"] for m in menus)
-    print(f"  발견 메뉴 {len(menus)}개 · 진단 시트 붙여넣기 대상 {ready}개 · 방문 페이지 {data['visited_count']}개")
+    print(f"  발견 메뉴 {len(menus)}개 · 확인된 메뉴 {ready}개 · 방문 페이지 {data['visited_count']}개")
     for status, count in Counter(m["status"] for m in menus).most_common():
         print(f"    - {status}: {count}")
     vis = Counter(m["visibility"] for m in menus if m.get("visibility"))
@@ -288,7 +287,7 @@ def save(data, out):
     else:
         name = "".join("_" if c in '\\/:*?"<>|' else c for c in data["config"]["site_name"]).strip(" .") or "메뉴수집"
         base = Path("결과") / f"{name}_메뉴목록_{datetime.now():%Y%m%d_%H%M%S}"
-        path, n = base.with_suffix(".xlsx"), 2
+        path, n = base.with_name(base.name + ".xlsx"), 2      # not with_suffix: names like www.example.com
         while path.exists():
             path, n = base.with_name(f"{base.name}_{n}.xlsx"), n + 1
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -297,7 +296,7 @@ def save(data, out):
         path.write_bytes(content)
     except PermissionError:
         # Usually the same file is open in Excel on Windows.
-        path = path.with_name(f"{path.stem}_{datetime.now():%H%M%S}{path.suffix}")
+        path = path.with_name(f"{path.stem}_{datetime.now():%H%M%S}.xlsx")
         print(f"  ※ 같은 이름의 파일이 열려 있어 다른 이름으로 저장합니다: {path.name}")
         path.write_bytes(content)
     return path.resolve()
@@ -552,6 +551,8 @@ def choose_targets(board, args, interactive, many=False, url="", items=None):
 
 def fill_step(menus, args, interactive, out_dir, url=""):
     """One crawl result -> one 진단 시트 (used after a single crawl and with --from-result)."""
+    if getattr(args, "collect_only", False):
+        return None
     if interactive:
         ui.header("진단표 기입")
     board = choose_board(args, interactive)
@@ -615,13 +616,15 @@ def choose_menus(confirmed, unverified, args, interactive):
     """confirmed + (optionally) navigation menus that could not be confirmed, e.g. behind a login."""
     if not unverified:
         return confirmed
+    if interactive and getattr(args, "unverified_asked", False):
+        print("  " + ui.dim(f"확인하지 못한 메뉴 {len(unverified)}개: " + ("포함" if args.include_unverified else "제외") + " (첫 대상에서 고른 대로)"))
     if not args.include_unverified and interactive and not getattr(args, "unverified_asked", False):
         args.unverified_asked = True
         from collections import Counter
         kinds = " · ".join(f"{k} {n}" for k, n in Counter(s for _, s in unverified).most_common())
         print()
         print(f"  메뉴 구조에서 이름은 확인했지만 페이지를 확인하지 못한 메뉴 {len(unverified)}개 ({kinds})")
-        args.include_unverified = ask_yes("  이 메뉴도 진단 시트에 넣을까요?", True)
+        args.include_unverified = ask_yes("  이 메뉴도 진단 시트에 넣을까요? (이후 대상에도 같은 답을 적용)", True)
     return confirmed + [d for d, _ in unverified] if args.include_unverified else confirmed
 
 
@@ -647,7 +650,7 @@ def run_crawl(config, args):
                 data = crawl(job, "after")
             else:
                 data = job.snapshot()
-        return data, None
+        return data, (KeyboardInterrupt() if job.stop.is_set() else None)
     except (KeyboardInterrupt, EngineError) as exc:
         print(f"\n  실행 오류: {exc}" if isinstance(exc, EngineError) else "\n  중단했습니다.")
         job.stop.set()
@@ -691,6 +694,7 @@ def campaign(args):
     ui.step(1, 3, "작업할 진단 엑셀")
     board = choose_board(args, True)
     if board is None:
+        args.collect_only = True
         return single_run(args)
     items = load_targets(board)
     ui.step(2, 3, "진단 대상")
@@ -725,35 +729,103 @@ def campaign(args):
     if not ask_yes("  모든 대상의 점검 권한(계약, 승인)을 확인했고, 이대로 시작할까요?", True):
         sys.exit("취소했습니다.")
 
-    done = []
+    done, idx, current, stop = [], 0, None, None
     try:
-        for i, (t, url, login_url) in enumerate(plan, 1):
+        while idx < len(plan):
+            t, url, login_url = plan[idx]
+            if idx:
+                print()
+                choice = ask(f"  다음 대상 {t.sheet or '진단 시트'} | Enter=시작 · s=이 대상 건너뛰기 · q=여기서 끝내기").strip().lower()
+                if choice in {"q", "ㅂ"}:
+                    break
+                if choice in {"s", "ㄴ"}:
+                    done.append((Filled(t, "건너뜀"), 0, "", url))
+                    idx += 1
+                    continue
+            current = (t, url)
             try:
-                done.append(run_target(i, len(plan), t, url, login_url, mode, settings, board, args))
+                done.append(run_target(idx + 1, len(plan), t, url, login_url, mode, settings, board, args))
             except Exception as exc:  # noqa: BLE001 - one broken target must not stop the others
                 ui.fail(f"{t.sheet or '진단 시트'} 처리 중 오류: {type(exc).__name__}: {exc}")
-                done.append((Filled(t, "실패"), 0, ""))
-            if i < len(plan) and not ask_yes(f"  다음 대상 {plan[i][0].sheet or '진단 시트'} 수집을 시작할까요?", True):
-                break
-    except KeyboardInterrupt:
+                done.append((Filled(t, "실패"), 0, "", url))
+            current = None
+            idx += 1
+    except (KeyboardInterrupt, SystemExit) as exc:
+        stop = exc
         print()
-        ui.note("중단했습니다. 지금까지 끝난 대상만 정리합니다.")
+        ui.note("중단했습니다. 지금까지 한 작업을 정리합니다.")
+        if current:
+            done.append((Filled(current[0], "중단"), 0, "", current[1]))
+            idx += 1
+    done += [(Filled(t, "실행 안 함"), 0, "", url) for t, url, _ in plan[idx:]]
 
     ui.header("작업 결과", board.label)
-    if done:
-        ui.table([("진단 시트", 28), ("수집", 5), ("기입", 15), ("중복 제외", 9), ("위치", 13), ("메뉴 목록 엑셀", 0)],
-                 [[f.target.sheet or "진단 시트", str(n), f.status + (f" {f.written}개" if f.written else ""),
-                   str(f.duplicates) if f.duplicates else "-", f.where or "-", name or "-"] for f, n, name in done])
+    ui.table([("진단 시트", 26), ("수집", 5), ("기입", 17), ("중복", 5), ("위치", 13), ("점검 주소", 0)],
+             [[f.target.sheet or "진단 시트", str(n) if n else "-", f.status + (f" {f.written}개" if f.written else ""),
+               str(f.duplicates) if f.duplicates else "-", f.where or "-", url] for f, n, _, url in done])
+    files = [name for _, _, name, _ in done if name]
+    if files:
+        print("  " + ui.dim(f"메뉴 목록 엑셀 {len(files)}개: {(Path('결과')).resolve()}"))
     print()
-    if isinstance(board, ExcelBoard) and board.current == board.src and done:
+    if isinstance(board, ExcelBoard) and board.current == board.src:
         ui.ok("새로 기입한 메뉴가 없어 새 진단 엑셀을 만들지 않았습니다. 작업 엑셀은 그대로입니다.")
     if isinstance(board, ExcelBoard) and board.current != board.src:
-        ui.ok(f"진단 엑셀: {board.out.resolve()}")
-        ui.say(ui.dim("원본은 그대로 두었습니다. 확인 후 이 파일로 작업을 이어 가면 됩니다."))
-        if os.name == "nt" and not args.no_open and ask_yes("  진단 엑셀을 열까요?", True):
+        ui.ok("진단 엑셀 (원본은 그대로):")
+        print("  " + str(board.out.resolve()))
+        if os.name == "nt" and not args.no_open and stop is None and ask_yes("  진단 엑셀을 열까요?", True):
             os.startfile(board.out)  # noqa: S606 - Windows only, local file the user just created
-    if any(f.status == "붙여넣기 준비" for f, _, _ in done):
+    if any(f.status == "붙여넣기 준비" for f, _, _, _ in done):
         print("  " + ui.dim("붙여넣기 파일과 입력 내역(.tsv)은 결과 폴더에 있습니다."))
+    if isinstance(stop, SystemExit):
+        raise stop
+
+
+def split_tokens(raw):
+    """'29-34, 36 41' -> ['29-34', '36', '41']: commas always split; spaces split only lists of numbers."""
+    out = []
+    for token in [x.strip() for x in re.split(r"[,，]", raw) if x.strip()]:
+        if re.fullmatch(r"[\d\s~-]+", token):
+            out += re.sub(r"\s*[-~]\s*", "-", token).split()
+        else:
+            out.append(token)
+    return out
+
+
+def exact_sheet(token, items):
+    key = "".join(token.split()).lower()
+    hits = [t for t in items if key in {"".join(t.sheet.split()).lower(), "".join(t.name.split()).lower()}]
+    return hits[0] if len(hits) == 1 else None
+
+
+def ask_optional_url(prompt):
+    """An address, or '' when the user presses Enter (no forced loop after a typo)."""
+    while True:
+        raw = ask(prompt)
+        if not raw:
+            return ""
+        if diag.address(raw):
+            return ask_url(raw)
+        print("  주소 형식이 아닙니다. 예: www.example.com  (건너뛰려면 Enter)")
+
+
+def pick_one(pool, items, prompt):
+    """One sheet out of pool (or any sheet by exact name); '' = skip."""
+    while True:
+        query = ask(prompt)
+        if not query:
+            return None
+        if query.strip() in {"?", "？"}:
+            show_targets(pool)
+            continue
+        for scope in (pool, items) if pool is not items else (items,):
+            try:
+                found = diag.select_targets(query, scope)
+            except ValueError:
+                continue
+            if len(found) == 1:
+                ui.ok(found[0].sheet)
+                return found[0]
+        ui.fail(f"'{query}'에 해당하는 진단 시트를 하나로 정할 수 없습니다. 이름을 더 적거나 ?로 목록을 보세요.")
 
 
 def pick_plan(board, args, items):
@@ -764,26 +836,57 @@ def pick_plan(board, args, items):
         print(f"  대표 도메인(D6)이 적힌 시트 {len(with_domain)}개 " + ui.dim("(번호나 이름만 입력하면 D6 주소로 수집)"))
         ui.grid([t.sheet for t in with_domain])
     print()
-    print("  진단할 시트 번호나 이름, 또는 점검 주소를 입력하세요. 여러 개는 쉼표로 구분합니다.")
-    print("  " + ui.dim("예: 29-34, 36, 41 | 뉴욕 | 전체 (D6이 적힌 시트 모두) | https://... | ? = 전체 시트 목록"))
+    if items:
+        print("  진단할 시트 번호나 이름, 또는 점검 주소를 입력하세요. 여러 개는 쉼표로 구분합니다.")
+        print("  " + ui.dim("예: 29-34, 36, 41 | 뉴욕 | 전체 (D6이 적힌 시트 모두) | https://... | ? = 전체 시트 목록"))
+    else:
+        print("  붙여넣을 진단 시트 이름이나 점검 주소를 입력하세요. 여러 개는 쉼표로 구분합니다.")
     plan = []
+    key = lambda name: "".join((name or "").split()).lower()  # noqa: E731
 
     def add(t, url):
-        if any(x.sheet == t.sheet and u == url for x, u, _ in plan):
+        if any(key(x.sheet) == key(t.sheet) and u == url for x, u, _ in plan):
             ui.note(f"이미 넣은 대상이라 건너뜁니다: {t.sheet}  {url}")
             return
-        again = any(x.sheet == t.sheet for x, _, _ in plan)
+        again = any(key(x.sheet) == key(t.sheet) for x, _, _ in plan)
         plan.append((t, url, ""))
         print(f"    + {len(plan)}. {t.sheet or '진단 시트'}  {url}" + ui.dim("  (같은 시트에 이어서 기입)" if again else ""))
 
-    def ask_address(t):
-        raw = ask(f"    {t.sheet} 점검 주소 (D6에 주소가 없음, 건너뛰려면 Enter)")
-        if not raw:
-            return ""
-        url = ask_url(raw)
-        if board.can_save_domain and not t.d6 and ask_yes(f"    이 주소를 {t.sheet} 대표 도메인(D6)에 적어 둘까요? 다음부터 번호만으로 수집합니다", True):
-            t.save_domain = url
-        return url
+    def offer_d6(t, url):
+        if board.can_save_domain and t.sheet and not t.d6 and not diag.match_url(url, [t]):
+            if ask_yes(f"    이 주소를 {t.sheet} 대표 도메인(D6)에 적어 둘까요? 다음부터 번호만으로 수집합니다", True):
+                t.save_domain = url
+
+    def by_url(url):
+        if not items:
+            name = ask("    이 주소를 붙여넣을 진단 시트 이름 (빼려면 Enter)")
+            return add(diag.Target(name, name), url) if name else ui.note("이 주소는 뺐습니다.")
+        hit, pool = map_url(url, items, True)
+        if hit is None:
+            if pool is items:
+                if not board.listed:
+                    show_targets(items)
+                board.listed = True
+            else:
+                ui.grid([t.sheet for t in pool])
+            hit = pick_one(pool, items, "  진단 대상 (이름 일부 · ?=목록 · Enter=이 주소 빼기)")
+            if hit is None:
+                return ui.note("이 주소는 뺐습니다.")
+            offer_d6(hit, url)
+        add(hit, url)
+
+    def by_sheet(t):
+        urls = t.addresses
+        if not urls:
+            url = ask_optional_url(f"    {t.sheet} 점검 주소 (D6에 주소가 없음, 건너뛰려면 Enter)")
+            if not url:
+                return ui.note(f"{t.sheet} 은(는) 주소가 없어 뺐습니다.")
+            offer_d6(t, url)
+            urls = [url]
+        if len(urls) > 1:
+            print("    " + ui.dim(f"{t.sheet}: D6 주소 {len(urls)}개를 차례로 수집해 같은 시트에 기입합니다."))
+        for url in urls:
+            add(t, ask_url(url))
 
     while True:
         raw = ask("  대상" if not plan else "  추가 대상 (다 입력했으면 Enter)")
@@ -795,36 +898,29 @@ def pick_plan(board, args, items):
         if raw.strip() in {"?", "？"}:
             show_targets(items)
             continue
-        for token in [x.strip() for x in re.split(r"[,，]", raw) if x.strip()]:
-            picked, problem = None, ""
-            if not re.match(r"https?://", token, re.I):
-                try:
-                    picked = with_domain if token in {"전체", "all", "*"} else diag.select_targets(token, items)
-                except ValueError as exc:
-                    problem = str(exc)
-            if picked is None and diag.address(token):
-                url = ask_url(token)
-                t = choose_targets(board, args, True, url=url, items=items)[0]
-                if t.sheet and not t.d6 and board.can_save_domain and not diag.match_url(url, [t]):
-                    if ask_yes(f"    이 주소를 {t.sheet} 대표 도메인(D6)에 적어 둘까요? 다음부터 번호만으로 수집합니다", True):
-                        t.save_domain = url
-                add(t, url)
+        for token in split_tokens(raw):
+            if re.match(r"https?://", token, re.I) or (diag.address(token) and not exact_sheet(token, items)):
+                if diag.address(token):
+                    by_url(ask_url(token))
+                else:
+                    ui.fail(f"'{token}'은(는) 주소 형식이 아닙니다.")
                 continue
-            if picked is None:
-                ui.fail(problem or f"'{token}'에 해당하는 진단 시트나 주소가 없습니다.")
+            if not items:                    # paste mode without a downloaded copy: the name is the sheet
+                by_sheet(diag.Target(token, token))
+                continue
+            try:
+                picked = with_domain if token in {"전체", "all", "*"} else diag.select_targets(token, items)
+            except ValueError as exc:
+                ui.fail(str(exc))
                 continue
             if not picked:
                 ui.fail("대표 도메인(D6)이 적힌 시트가 없습니다. 시트 번호나 주소로 입력하세요.")
             for t in picked:
-                urls = t.addresses or [u for u in [ask_address(t)] if u]
-                if len(urls) > 1:
-                    print("    " + ui.dim(f"{t.sheet}: D6 주소 {len(urls)}개를 차례로 수집해 같은 시트에 기입합니다."))
-                for url in urls:
-                    add(t, ask_url(url))
+                by_sheet(t)
 
 
 def run_target(i, total, t, url, login_url, mode, settings, board, args):
-    """One 진단 대상: crawl -> save the menu list -> fill the 진단 시트. -> (Filled, menus, result file name)."""
+    """One 진단 대상: crawl -> save the menu list -> fill the 진단 시트. -> (Filled, menus, result file, url)."""
     ui.header(f"[{i}/{total}] {t.name or t.sheet}", f"{t.sheet}  {url}")
     try:
         config = CrawlConfig(url=url, mode=mode, site_name=(t.name or t.sheet or urlsplit(url).hostname or "메뉴 수집")[:120],
@@ -832,23 +928,28 @@ def run_target(i, total, t, url, login_url, mode, settings, board, args):
                              menu_selector=args.selector, headless=args.headless and mode == "public", **settings)
     except ValidationError as exc:
         ui.fail("입력값 오류: " + "; ".join(e["msg"] for e in exc.errors()))
-        return Filled(t, "실패"), 0, ""
+        return Filled(t, "실패"), 0, "", url
     data, error = run_crawl(config, args)
     if data is None:
         ui.fail("수집한 메뉴가 없습니다.")
-        return Filled(t, "수집 실패"), 0, ""
+        return Filled(t, "수집 실패"), 0, "", url
     summary(data)
     path = save(data, "")
     print()
     ui.ok(f"메뉴 목록 엑셀: {path.name}")
-    ui.say(ui.dim(str(path.parent)))
+    print("  " + ui.dim(str(path.parent)))
+    reached = [p for p in data.get("pages", []) if p.get("status") == "수집됨"]
+    if not data["menus"] or (data.get("pages") and not reached and not any(m.get("ready") for m in data["menus"])):
+        why = next((p.get("reason") or p.get("status") for p in data.get("pages", []) if p.get("status") != "수집됨"), "")
+        ui.fail("메뉴를 수집하지 못해 기입하지 않았습니다." + (f" 사유: {why}" if why else " 주소와 접속(VPN, 사내망)을 확인하세요."))
+        return Filled(t, "수집 실패"), 0, path.name, url
     confirmed, unverified = diag.menus_from_report(data, include_unverified=True)
     menus = choose_menus(confirmed, unverified, args, True)
-    if error is not None and not ask_yes(f"  수집이 중간에 멈췄습니다. 지금까지의 메뉴 {len(menus)}개를 진단 시트에 기입할까요?", False):
-        return Filled(t, "기입 안 함"), len(menus), path.name
+    if error is not None and not ask_yes(f"  수집을 중간에 멈췄습니다. 멈춘 시점까지의 메뉴 {len(menus)}개를 진단 시트에 기입할까요?", True):
+        return Filled(t, "기입 안 함"), len(menus), path.name, url
     print()
     print("  " + ui.bold(f"> 진단 시트 기입: {t.sheet or '진단 시트'}"))
-    return board.fill(t, menus, True, path.parent), len(menus), path.name
+    return board.fill(t, menus, True, path.parent), len(menus), path.name, url
 
 
 def main(argv=None):

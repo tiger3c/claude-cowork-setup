@@ -452,7 +452,7 @@ class Crawler:
         if self.config.mode == "compare" and self.phase == "before" and not self.stop.is_set():
             message = "1단계(로그인 전) 수집을 마쳤습니다. 다음은 로그인 단계입니다."
         else:
-            message = "수집을 종료했습니다. 미수집·확인 필요 항목을 검토한 뒤 엑셀을 내려받으세요."
+            message = "수집을 종료했습니다. 미수집·확인 필요 항목은 결과 엑셀에서 확인하세요."
         self.emit("stopped" if self.stop.is_set() else "complete", message)
 
 

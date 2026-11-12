@@ -114,7 +114,9 @@ def plan(path, sheet, menus):
         path_ = tuple(clean(grid.get((col, r), "")) for r in MENU_ROWS)
         if any(path_):
             existing.add(path_)
-    free = [c for c in range(FIRST_COL, LAST_COL + 1) if c not in used]
+    # Like the Google Sheets backends: new menus continue after the last used column, never into gaps
+    # (a gap may be left empty on purpose and would break the menu order).
+    free = list(range(max(used) + 1 if used else FIRST_COL, LAST_COL + 1))
     p = Plan(sheet, free, len(existing))
     slots = iter(free)
     seen = set()
@@ -207,10 +209,9 @@ def write(src, dst, p: Plan):
     calc = book.find(M + "calcPr")
     if calc is None:
         calc = etree.Element(M + "calcPr")
-        anchor = book.find(M + "definedNames")
-        if anchor is None:
-            anchor = book.find(M + "sheets")
-        anchor.addnext(calc)
+        # CT_Workbook order: sheets, functionGroups, externalReferences, definedNames, calcPr, ...
+        anchor = [e for e in book if e.tag in {M + t for t in ("sheets", "functionGroups", "externalReferences", "definedNames")}]
+        anchor[-1].addnext(calc)
     calc.set("fullCalcOnLoad", "1")
     new_sheet = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
     new_book = etree.tostring(book, xml_declaration=True, encoding="UTF-8", standalone=True)
@@ -372,19 +373,20 @@ class PastePlan:
     checked: bool                   # True when the sheet's current state was read from a downloaded copy
 
 
-def plan_paste(snapshot, sheet, menus):
+def plan_paste(snapshot, sheet, menus, prior=None):
     """Where to paste in a Google Sheets 진단 시트: right after its last used menu column.
 
     snapshot is the Google sheet downloaded as .xlsx (or None when the sheet is known to be empty).
     Columns to the right of the last used one are all free, so the pasted block is contiguous.
+    prior = {"start": next free column, "keys": set of paths} for blocks already pasted in this run.
     """
-    existing, start = set(), FIRST_COL
+    existing, start = set(prior["keys"]) if prior else set(), prior["start"] if prior else FIRST_COL
     if snapshot:
         wb = Workbook(snapshot)
         grid = wb.grid(sheet)
         used = {c for c, _ in grid}
         if used:
-            start = max(used) + 1
+            start = max(start, max(used) + 1)
         for col in used:
             key = tuple(clean(grid.get((col, r), "")) for r in MENU_ROWS)
             if any(key):
@@ -438,16 +440,37 @@ class Target:
         return f"{L(self.start)}13" if self.start <= LAST_COL else "칸 없음"
 
 
+HOST = re.compile(r"^(?:[^\W_](?:(?:[^\W_]|-)*[^\W_])?\.)+(?:[^\W\d_]{2,63}|xn--[a-z0-9-]+)$|^localhost$|^\d{1,3}(?:\.\d{1,3}){3}$", re.I)
+
+
+def valid_host(host):
+    """www.example.com, 정부.한국, 10.0.0.1, localhost -- not '2개', 'v1.8', 'a.com(운영'."""
+    return bool(host) and bool(HOST.match(host.rstrip(".")))
+
+
+def address(token):
+    """'www.a.com/app' -> 'https://www.a.com/app'; anything that is not a web address -> ''."""
+    token = token.strip().strip("'\"<>[]{}.,;:")
+    if not token or "@" in token.split("/", 3)[2 if "://" in token else 0]:
+        return ""
+    url = token if re.match(r"https?://", token, re.I) else ("" if "://" in token else "https://" + token)
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+        parts.port                                   # noqa: B018 - raises on a bad port
+    except ValueError:
+        return ""
+    return url if valid_host(host) else ""
+
+
 def domains(value):
-    """Every address in a 대표 도메인 cell: one or several, split by spaces, commas or line breaks."""
+    """Every address in a 대표 도메인 cell: one or several, split by spaces, commas, brackets or line breaks.
+    Notes such as '(운영)', '입니다.' or the form's '예) ...' hint are ignored."""
     out = []
-    text = re.sub(r"예\).*", " ", str(value or ""))          # '예) https://...' is the form's hint, not an address
-    for token in re.split(r"[\s,;，]+", CONTROL.sub(" ", text)):
-        token = token.strip("()[]<>'\"")
-        if not token or token == "=formula" or ("." not in token and not re.match(r"(https?://)?localhost\b", token, re.I)):
-            continue
-        url = token if "://" in token else "https://" + token
-        if _host_path(url)[0] and url not in out:
+    text = re.sub(r"예\).*", " ", CONTROL.sub(" ", str(value or "")))
+    for token in re.split(r"[\s,;，()（）\[\]]+", text):
+        url = address(token)
+        if url and url not in out:
             out.append(url)
     return out
 
@@ -513,7 +536,11 @@ def select_targets(text, items):
 
 def _host_path(url):
     parts = urlsplit(url if "://" in url else "https://" + url)
-    host = (parts.hostname or "").lower()
+    host = (parts.hostname or "").lower().rstrip(".")
+    try:
+        host = host.encode("idna").decode("ascii")      # 정부.한국 == xn--or3bn7q.xn--3e0b707e
+    except UnicodeError:
+        pass
     host = host[4:] if host.startswith("www.") else host
     return host, parts.path.rstrip("/").lower()
 

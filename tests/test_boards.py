@@ -167,3 +167,72 @@ def test_no_page_or_time_limit_by_default():
     args = cli.parse_args([])
     assert (args.max_pages, args.max_seconds) == (0, 0)
     assert cli.limits(0, 0) == "페이지 수·시간 제한 없음"
+
+
+def test_d6_notes_are_not_addresses():
+    assert diag.domains("메인 https://www.a.go.kr 입니다.") == ["https://www.a.go.kr"]
+    assert diag.domains("www.a.com(운영) 외 2개.") == ["https://www.a.com"]
+    assert diag.domains("v1.0 admin@a.com www.b.com") == ["https://www.b.com"]
+    assert diag.address("v1.8") == "" and diag.address("n") == "" and diag.address("01_www.a.com") == ""
+    t = diag.Target("01_a", "a", d6="정부.한국")
+    assert diag.match_url("https://xn--or3bn7q.xn--3e0b707e/main", [t]) == [t]
+
+
+def test_excel_fills_after_last_used_column_not_into_gaps(tmp_path):
+    path = book_with_domains(tmp_path / "d.xlsx")
+    wb = load_workbook(path)
+    ws = wb["02_빈시트"]
+    ws["H13"], ws["J13"] = "가", "다"            # I left empty on purpose
+    wb.save(path)
+    p = diag.plan(path, "02_빈시트", [["새1"], ["새2"]])
+    assert [diag.L(c) for c, _ in p.to_write] == ["K", "L"]
+
+
+def test_paste_board_same_sheet_twice_continues_after_first_block(tmp_path):
+    from menu_crawler.boards import PasteBoard
+    board = PasteBoard(str(book_with_domains(tmp_path / "d.xlsx")))
+    target = {t.sheet: t for t in board.targets()}["01_테스트"]
+    a = board.fill(target, [["가"], ["나"]], False, tmp_path)
+    b = board.fill(target, [["나"], ["다"]], False, tmp_path)
+    assert (a.where, b.where, b.written, b.duplicates) == ("J13:K15", "L13:L15", 1, 1)
+    assert len(list(tmp_path.glob("구글시트붙여넣기_*[0-9].tsv"))) == 2
+
+
+def test_calcpr_goes_after_external_references(tmp_path):
+    import zipfile
+    from lxml import etree
+    src = book_with_domains(tmp_path / "d.xlsx")
+    bad = tmp_path / "noc.xlsx"
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(bad, "w") as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "xl/workbook.xml":
+                root = etree.fromstring(data)
+                for e in list(root):
+                    if e.tag.endswith(("calcPr", "definedNames")):
+                        root.remove(e)
+                sheets = [e for e in root if e.tag.endswith("sheets")][0]
+                sheets.addnext(etree.Element(sheets.tag.replace("sheets", "externalReferences")))
+                data = etree.tostring(root)
+            zout.writestr(item, data)
+    out = diag.write(bad, tmp_path / "o.xlsx", diag.plan(bad, "02_빈시트", [["가"]]))
+    with zipfile.ZipFile(out) as z:
+        tags = [e.tag.split("}")[1] for e in etree.fromstring(z.read("xl/workbook.xml"))]
+    assert tags.index("calcPr") == tags.index("externalReferences") + 1
+
+
+def test_token_links_are_one_page():
+    from menu_crawler.urls import page_shape
+    assert page_shape("https://a.com/m.do?menuNo=1&_csrf=ab12cd34") == page_shape("https://a.com/m.do?menuNo=1&_csrf=99ff00ee")
+    assert page_shape("https://a.com/m.do?menuNo=1") != page_shape("https://a.com/m.do?menuNo=2")
+    assert page_shape("https://a.com/x?_=1731400000000") == page_shape("https://a.com/x?_=1731400099999")
+
+
+def test_closed_input_stops_instead_of_looping(monkeypatch):
+    from menu_crawler import cli
+
+    def eof(prompt=""):
+        raise EOFError
+    monkeypatch.setattr("builtins.input", eof)
+    with pytest.raises(SystemExit):
+        cli.main([])

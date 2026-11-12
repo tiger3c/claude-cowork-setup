@@ -22,4 +22,11 @@ assert.strictEqual(JSON.stringify(p.write), JSON.stringify([['고객센터', '�
 const f = blank(3); f[0][W - 1] = '끝';
 p = planFill(f, blank(48), [['새 메뉴']]);
 assert.strictEqual(p.write.length, 0); assert.strictEqual(p.overflow.length, 1);
+// narrow sheet (columns only up to J): never past the last column
+p = planFill(blank(3), blank(48), [['a'], ['b'], ['c'], ['d']], 10);
+assert.strictEqual(p.write.length, 3); assert.strictEqual(p.overflow.length, 1);
+// a formula cell counts as used
+const fm = blank(3); fm[0][2] = '=formula';
+p = planFill(fm, blank(48), [['x']]);
+assert.strictEqual(p.cell, 'K13');
 console.log('ok');

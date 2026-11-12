@@ -64,6 +64,8 @@ class SheetsBoard:
                   + (f" · 칸 부족 {len(pre['overflow'])}개" if pre["overflow"] else ""))
             if not count:
                 ui.ok("새로 넣을 메뉴가 없습니다." + (" 수집한 메뉴가 모두 시트에 이미 있습니다." if pre["duplicates"] else ""))
+                if target.save_domain and self.client.fill(target.sheet, [], domain=target.save_domain).get("domainSaved"):
+                    ui.ok("대표 도메인(D6)을 적었습니다.")
                 return Filled(target, "새 메뉴 없음", duplicates=len(pre["duplicates"]), overflow=len(pre["overflow"]))
             print(f"  입력 위치: ‘{target.sheet}’ {pre['range']}  (값만 입력 · 서식·수식·결과 칸은 그대로)")
             _preview(pre["write"])
@@ -88,6 +90,8 @@ class PasteBoard:
 
     def __init__(self, snapshot="", copy=None):
         self.snapshot, self.copy = snapshot, copy
+        self.pasted = {}        # sheet -> {"start", "keys"}: blocks handed out in this run (the snapshot does not know them)
+        self.seq = 0
         self.label = "구글 시트 붙여넣기" + (f" · {Path(snapshot).name} 기준" if snapshot else "")
 
     def targets(self):
@@ -95,7 +99,7 @@ class PasteBoard:
 
     def fill(self, target, menus, interactive, out_dir):
         sheet = target.sheet
-        p = diag.plan_paste(self.snapshot or None, sheet, menus)
+        p = diag.plan_paste(self.snapshot or None, sheet, menus, self.pasted.get(sheet))
         if p.checked:
             print(f"  시트에 있는 메뉴 {p.existing}개 · 새로 붙여넣을 메뉴 {len(p.menus)}개 · 이미 있어 뺀 메뉴 {len(p.duplicates)}개")
         if not p.menus:
@@ -106,7 +110,10 @@ class PasteBoard:
             ui.note("메뉴가 없는 빈 진단 시트에만 붙여넣으세요. 메뉴가 있는 시트라면 구글 시트를 .xlsx로 내려받아 지정하면 이어 붙일 칸을 계산합니다.")
         where = _range(p.start, p.start + len(p.menus) - 1)
         cell = f"{diag.L(p.start)}13"
-        base = Path(out_dir) / f"구글시트붙여넣기_{_safe(sheet)}_{datetime.now():%Y%m%d_%H%M%S}"
+        self.seq += 1
+        base = Path(out_dir) / f"구글시트붙여넣기_{_safe(sheet)}_{datetime.now():%Y%m%d_%H%M%S}_{self.seq}"
+        prev = self.pasted.get(sheet, {"keys": set()})
+        self.pasted[sheet] = {"start": p.start + len(p.menus), "keys": prev["keys"] | {tuple(m) for m in p.menus}}
         tsv = base.with_suffix(".tsv")
         block = diag.paste_text(p.menus)
         tsv.write_text(block + "\r\n", encoding="utf-8")
@@ -142,31 +149,50 @@ class ExcelBoard:
 
     def fill(self, target, menus, interactive, out_dir):
         p = diag.plan(self.current, target.sheet, menus)
-        domain = target.save_domain
-        if domain and not diag.cell_values(self.current, target.sheet, {"D6"}).get("D6"):
-            p.cells["D6"] = domain
+        if target.save_domain and not diag.cell_values(self.current, target.sheet, {"D6"}).get("D6"):
+            p.cells["D6"] = target.save_domain
         print(f"  시트에 있는 메뉴 {p.existing}개 · 새로 입력 {len(p.to_write)}개 · 이미 있어 뺀 메뉴 {len(p.duplicates)}개"
               + (f" · 칸 부족 {len(p.overflow)}개" if p.overflow else ""))
-        if not p.to_write:
+        where = _range(p.to_write[0][0], p.to_write[-1][0]) if p.to_write else ""
+        if p.to_write:
+            print(f"  입력 위치: ‘{target.sheet}’ {where}  (값만 입력 · 서식·수식·결과 칸은 그대로)")
+            _preview([d for _, d in p.to_write])
+        else:
             ui.ok("새로 넣을 메뉴가 없습니다." + (" 수집한 메뉴가 모두 시트에 이미 있습니다." if p.duplicates else "")
                   + (" 빈 열이 없어 넣지 못한 메뉴는 입력 내역에 남깁니다." if p.overflow else ""))
-            if p.overflow:
-                diag.receipt(p, Path(out_dir) / f"{_safe(target.sheet)}_칸부족_{datetime.now():%Y%m%d_%H%M%S}_입력내역.tsv")
+        if p.to_write or p.cells:
+            if not self._save(p, interactive):
+                return Filled(target, "실패")
+            self.current = self.out
+        if p.to_write or p.overflow:
+            folder = self.out.parent if p.to_write else Path(out_dir)
+            diag.receipt(p, folder / f"{self.out.stem}_{_safe(target.sheet)}_{datetime.now():%H%M%S}_입력내역.tsv")
+        if not p.to_write:
+            if p.cells:
+                ui.ok("대표 도메인(D6)을 적었습니다.")
             return Filled(target, "새 메뉴 없음", duplicates=len(p.duplicates), overflow=len(p.overflow))
-        where = _range(p.to_write[0][0], p.to_write[-1][0])
-        print(f"  입력 위치: ‘{target.sheet}’ {where}  (값만 입력 · 서식·수식·결과 칸은 그대로)")
-        _preview([d for _, d in p.to_write])
-        try:
-            if self.current == self.src:
-                diag.write(self.src, self.out, p)
-            else:   # later targets go into the same output file
-                tmp = self.out.with_name(self.out.stem + "_tmp" + self.out.suffix)
-                diag.write(self.out, tmp, p)
-                os.replace(tmp, self.out)
-        except PermissionError:
-            ui.fail(f"'{self.out.name}' 파일이 엑셀에서 열려 있어 저장하지 못했습니다. 파일을 닫고 다시 실행하세요.")
-            return Filled(target, "실패")
-        self.current = self.out
-        diag.receipt(p, self.out.with_name(f"{self.out.stem}_{_safe(target.sheet)}_입력내역.tsv"))
         ui.ok(f"‘{target.sheet}’ {where}에 {len(p.to_write)}개 입력했습니다." + (" 대표 도메인(D6)도 적었습니다." if p.cells else ""))
         return Filled(target, "입력 완료", where, len(p.to_write), len(p.duplicates), len(p.overflow), str(self.out.resolve()))
+
+    def _save(self, p, interactive):
+        """Write the plan into the output copy. The copy is replaced only after the new file verified."""
+        src = self.src if self.current == self.src else self.out
+        tmp = self.out.with_name(self.out.stem + "_저장중" + self.out.suffix)
+        try:
+            while True:
+                try:
+                    diag.write(src, tmp, p)
+                    os.replace(tmp, self.out)
+                    return True
+                except PermissionError:
+                    msg = f"'{self.out.name}' 파일이 엑셀 등 다른 프로그램에서 열려 있어 저장하지 못했습니다."
+                    if interactive and ui.ask_yes(f"  {msg} 파일을 닫고 다시 시도할까요?", True):
+                        continue
+                    ui.fail(msg + " 이 대상은 기입하지 않았습니다.")
+                    return False
+                except (OSError, RuntimeError, ValueError) as exc:
+                    ui.fail(f"저장하지 못했습니다: {exc}  (이 대상은 기입하지 않았습니다)")
+                    return False
+        finally:
+            if tmp.exists():
+                tmp.unlink()

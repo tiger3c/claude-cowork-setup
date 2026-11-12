@@ -174,8 +174,8 @@ def ask(prompt, default=""):
         # input() writes its prompt straight to the console (not through sys.stdout) on Windows.
         text = f"{prompt}{suffix}: "
         value = input(plain(text) if isinstance(sys.stdout, ConsoleText) else text).strip()
-    except EOFError:
-        value = ""
+    except EOFError:            # input closed (e.g. piped): stop instead of asking forever
+        raise SystemExit("\n  입력이 끝나 종료합니다.") from None
     return value or default
 
 

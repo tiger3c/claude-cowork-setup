@@ -14,10 +14,12 @@ from playwright.sync_api import Error as BrowserError
 from playwright.sync_api import sync_playwright
 
 from .models import PHASES, CrawlConfig, Menu, Report
-from .urls import AUTH, canonical_url, public_url, visit_policy
+from .urls import AUTH, canonical_url, page_shape, public_url, visit_policy
 
 EXTRACT = Path(__file__).with_name("extract.js").read_text(encoding="utf-8")
 
+
+SAME_PAGE_VISITS = 3     # visits of one page whose links differ only in a token / timestamp
 
 class Crawler:
     """Owned by one thread, including every Playwright call."""
@@ -32,6 +34,7 @@ class Crawler:
         self.results: dict[str, dict] = {}
         self.pending: deque[tuple[str, int]] = deque()
         self.scheduled: set[str] = set()
+        self.shapes: dict[str, int] = {}
         self.issue_keys: set[tuple] = set()
         self.phase = "after" if config.mode == "login" else "before"
         self.pw = self.browser = self.context = self.page = None
@@ -129,6 +132,13 @@ class Crawler:
         if hops > self.config.max_hops:
             self.issue("탐색 이동 제한", url, "최대 이동 횟수 때문에 이 주소는 방문하지 못했습니다.")
             return
+        shape = page_shape(url)
+        seen = self.shapes.get(shape, 0)
+        self.shapes[shape] = seen + 1
+        if seen >= SAME_PAGE_VISITS:     # token / timestamp in the link: the same page again and again
+            if seen == SAME_PAGE_VISITS:
+                self.issue("같은 페이지 반복", url, f"주소의 토큰·시각 값만 바뀐 같은 페이지라 {SAME_PAGE_VISITS}번까지만 방문했습니다.")
+            return
         self.scheduled.add(url)
         self.pending.append((url, hops))
 
@@ -164,7 +174,7 @@ class Crawler:
             for key, m in list(self.items.items()):
                 if m.url == url and m.evidence in {"일반 링크", "공통 링크"}:
                     del self.items[key]
-        key = tuple(path), url, source if kind == "dynamic" or review else ""
+        key = tuple(path), page_shape(url) if url else "", source if kind == "dynamic" or review else ""
         if key in self.items:
             self.mark_seen([self.items[key]])
             return
@@ -351,6 +361,7 @@ class Crawler:
         self.results.clear()
         self.pending.clear()
         self.scheduled.clear()
+        self.shapes.clear()
         if self.phase == "after" and "before" in self.report.phases_done:
             for item in self.items.values():
                 if not item.status_before and "before" in item.seen:

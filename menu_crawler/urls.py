@@ -60,3 +60,18 @@ def visit_policy(url: str, hosts: set[str]) -> tuple[str, str]:
     if AUTH.search(url):
         return "로그인 필요", "로그인 경로입니다. 인증 후 현재 화면 추가 또는 재수집을 사용하세요."
     return "대기", ""
+
+
+VOLATILE = re.compile(r"^(?:[0-9a-f]{16,}|[A-Za-z0-9_\-+/=.]{24,}|\d{10,13})$")
+VOLATILE_KEYS = re.compile(r"^(?:_|_?csrf.*|.*xsrf.*|.*token.*|nonce|_?ts|timestamp|_?t|_?rnd|random|_dc|cachebust.*|cb|sid|jsessionid|phpsessid)$", re.I)
+
+
+def page_shape(url: str) -> str:
+    """The same page with only a token / cache-buster / timestamp changed has the same shape.
+    Real parameters (menuNo=12, id=3) are kept, so different menus stay different."""
+    try:
+        p = urlsplit(url)
+    except ValueError:
+        return url
+    query = sorted((k, "*" if VOLATILE_KEYS.match(k) or VOLATILE.match(v) else v) for k, v in parse_qsl(p.query, keep_blank_values=True))
+    return urlunsplit((p.scheme, p.netloc, p.path, urlencode(query), p.fragment))

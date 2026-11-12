@@ -92,7 +92,7 @@ function fillSheet(ss, req) {
   if (!lock.tryLock(30000)) return { ok: false, error: '다른 사용자가 입력 중입니다. 잠시 후 다시 시도하세요.' };
   try {
     var area = readArea(sh);
-    var p = planFill(area.menus, area.results, req.menus || []);
+    var p = planFill(area.menus, area.results, req.menus || [], area.lastCol);
     p.ok = true;
     p.sheet = req.sheet;
     p.range = p.write.length ? colName(p.start) + MENU_ROW + ':' + colName(p.start + p.write.length - 1) + (MENU_ROW + 2) : '';
@@ -102,13 +102,15 @@ function fillSheet(ss, req) {
         for (var i = 0; i < 3; i++) rows[i].push(m[i] ? "'" + m[i] : '');   // ' = 글자로 입력 (수식·날짜로 바뀌지 않음)
       });
       sh.getRange(MENU_ROW, p.start, 3, p.write.length).setValues(rows);   // 값만 입력, 서식은 그대로
+    }
+    if (!req.dryRun && req.domain) {
       var d6 = sh.getRange('D6');
-      if (req.domain && cleanText(d6.getValue()) === '') {                 // 비어 있을 때만 대표 도메인 기록
+      if (cleanText(d6.getValue()) === '' && d6.getFormula() === '') {       // 비어 있을 때만 대표 도메인 기록
         d6.setValue("'" + cleanText(req.domain));
         p.domainSaved = true;
       }
-      SpreadsheetApp.flush();
     }
+    if (!req.dryRun) SpreadsheetApp.flush();
     p.written = req.dryRun ? 0 : p.write.length;
     return p;
   } finally {
@@ -116,14 +118,27 @@ function fillSheet(ss, req) {
   }
 }
 
-function readArea(sh) {   // one read per sheet: rows 13~67, columns H~IW
-  var rows = sh.getRange(MENU_ROW, FIRST_COL, RESULT_ROW + RESULT_COUNT - MENU_ROW, LAST_COL - FIRST_COL + 1).getValues();
-  return { menus: rows.slice(0, 3), results: rows.slice(RESULT_ROW - MENU_ROW) };
+function readArea(sh) {   // one read per sheet: rows 13~67, columns H~IW (clamped to the sheet's size)
+  var height = RESULT_ROW + RESULT_COUNT - MENU_ROW;
+  var width = Math.min(LAST_COL, sh.getMaxColumns()) - FIRST_COL + 1;
+  var rowsAvail = Math.min(height, sh.getMaxRows() - MENU_ROW + 1);
+  var full = LAST_COL - FIRST_COL + 1;
+  var grid = [];
+  for (var r = 0; r < height; r++) grid.push(new Array(full).fill(''));
+  if (width > 0 && rowsAvail > 0) {
+    var range = sh.getRange(MENU_ROW, FIRST_COL, rowsAvail, width);
+    var values = range.getValues(), formulas = range.getFormulas();
+    for (var i = 0; i < rowsAvail; i++) {
+      for (var j = 0; j < width; j++) grid[i][j] = formulas[i][j] ? '=formula' : values[i][j];   // a formula cell is used
+    }
+  }
+  return { menus: grid.slice(0, 3), results: grid.slice(RESULT_ROW - MENU_ROW), lastCol: FIRST_COL + Math.max(width, 0) - 1 };
 }
 
 /** Pure logic (tested with node): where the new menus go. menus/results are rows x columns from H. */
-function planFill(menuRows, resultRows, menus) {
+function planFill(menuRows, resultRows, menus, lastCol) {
   var width = LAST_COL - FIRST_COL + 1;
+  var limit = Math.min(LAST_COL, lastCol || LAST_COL);   // never past the sheet's last column (no new columns)
   var used = -1;
   var existing = {};
   var count = 0;
@@ -138,7 +153,7 @@ function planFill(menuRows, resultRows, menus) {
     }
   }
   var start = FIRST_COL + used + 1;
-  var room = Math.max(0, LAST_COL - start + 1);
+  var room = Math.max(0, limit - start + 1);
   var write = [], duplicates = [], overflow = [], seen = {};
   (menus || []).forEach(function (m) {
     var d = [0, 1, 2].map(function (i) { return cleanText((m || [])[i]); });

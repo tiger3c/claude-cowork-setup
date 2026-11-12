@@ -65,10 +65,8 @@ def ask_url(initial, prompt="수집할 사이트 주소 (예: https://www.exampl
         if url and "://" not in url:
             url = "https://" + url
         try:
-            value = CrawlConfig(url=url).url
-            host = urlsplit(value).hostname or ""
-            if "." in host or host == "localhost" or ":" in host:
-                return value
+            if diag.address(url):
+                return CrawlConfig(url=url).url
         except ValidationError:
             pass
         print("  주소 형식이 아닙니다. 예: www.example.com 또는 https://www.example.com")
@@ -445,7 +443,9 @@ def choose_board(args, interactive):
         except SheetError as exc:
             sys.exit(str(exc))
         if client is None:
-            return choose_board(args, interactive) if interactive else None
+            if interactive and not args.target:
+                return choose_board(args, interactive)
+            return None
         return SheetsBoard(client)
     if kind == "google":
         snapshot = args.snapshot
@@ -528,6 +528,9 @@ def choose_targets(board, args, interactive, many=False, url="", items=None):
             if not interactive:
                 sys.exit("--sheet 로 진단 시트를 지정하세요. 예: --sheet 01_사이트A")
             query = ask(f"  진단 대상 (이름 일부만 써도 됨, {'여러 개는 쉼표, ' if many else ''}목록 다시 보기 ?)")
+            if not query:
+                print("  진단 대상을 입력하세요.")
+                continue
             if query in {"?", "？"}:
                 show_targets(pool)
                 query = ""
@@ -627,6 +630,9 @@ def run_crawl(config, args):
     try:
         data = wait(job, quiet=True)
         print("  " + data["message"])
+        if job.stop.is_set():          # q while the browser was opening: do not start an unlimited crawl
+            print("  중지 요청으로 수집을 시작하지 않습니다.")
+            return None, KeyboardInterrupt()
         if config.mode in {"public", "compare"}:
             if config.mode == "compare":
                 print("\n  [1단계] 로그인 전 공개 메뉴 수집")
@@ -718,7 +724,11 @@ def campaign(args):
     done = []
     try:
         for i, (t, url, login_url) in enumerate(plan, 1):
-            done.append(run_target(i, len(plan), t, url, login_url, mode, settings, board, args))
+            try:
+                done.append(run_target(i, len(plan), t, url, login_url, mode, settings, board, args))
+            except (OSError, RuntimeError, ValueError, SheetError, zipfile.BadZipFile) as exc:
+                ui.fail(f"{t.sheet or '진단 시트'} 처리 중 오류: {exc}")
+                done.append((Filled(t, "실패"), 0, ""))
             if i < len(plan) and not ask_yes(f"  다음 대상 {plan[i][0].sheet or '진단 시트'} 수집을 시작할까요?", True):
                 break
     except KeyboardInterrupt:
@@ -742,9 +752,6 @@ def campaign(args):
         print("  " + ui.dim("붙여넣기 파일과 입력 내역(.tsv)은 결과 폴더에 있습니다."))
 
 
-URLISH = re.compile(r"^(https?://)?[\w-]+(\.[\w-]+)+(:\d+)?(/\S*)?$", re.I)
-
-
 def pick_plan(board, args, items):
     """Sheets by number/name/'전체' (their D6 addresses are used) and/or inspection URLs (mapped by D6).
     -> [(target, url, login_url)] without duplicates; one entry per address."""
@@ -766,11 +773,11 @@ def pick_plan(board, args, items):
         print(f"    + {len(plan)}. {t.sheet or '진단 시트'}  {url}" + ui.dim("  (같은 시트에 이어서 기입)" if again else ""))
 
     def ask_address(t):
-        raw = ask(f"    {t.sheet} 점검 주소 (D6이 비어 있음, 건너뛰려면 Enter)")
+        raw = ask(f"    {t.sheet} 점검 주소 (D6에 주소가 없음, 건너뛰려면 Enter)")
         if not raw:
             return ""
         url = ask_url(raw)
-        if board.can_save_domain and ask_yes(f"    이 주소를 {t.sheet} 대표 도메인(D6)에 적어 둘까요? 다음부터 번호만으로 수집합니다", True):
+        if board.can_save_domain and not t.d6 and ask_yes(f"    이 주소를 {t.sheet} 대표 도메인(D6)에 적어 둘까요? 다음부터 번호만으로 수집합니다", True):
             t.save_domain = url
         return url
 
@@ -785,7 +792,13 @@ def pick_plan(board, args, items):
             show_targets(items)
             continue
         for token in [x.strip() for x in re.split(r"[,，]", raw) if x.strip()]:
-            if URLISH.match(token) and not re.fullmatch(r"[\d\s~-]+", token):
+            picked, problem = None, ""
+            if not re.match(r"https?://", token, re.I):
+                try:
+                    picked = with_domain if token in {"전체", "all", "*"} else diag.select_targets(token, items)
+                except ValueError as exc:
+                    problem = str(exc)
+            if picked is None and diag.address(token):
                 url = ask_url(token)
                 t = choose_targets(board, args, True, url=url, items=items)[0]
                 if t.sheet and not t.d6 and board.can_save_domain and not diag.match_url(url, [t]):
@@ -793,10 +806,8 @@ def pick_plan(board, args, items):
                         t.save_domain = url
                 add(t, url)
                 continue
-            try:
-                picked = with_domain if token in {"전체", "all", "*"} else diag.select_targets(token, items)
-            except ValueError as exc:
-                ui.fail(str(exc))
+            if picked is None:
+                ui.fail(problem or f"'{token}'에 해당하는 진단 시트나 주소가 없습니다.")
                 continue
             if not picked:
                 ui.fail("대표 도메인(D6)이 적힌 시트가 없습니다. 시트 번호나 주소로 입력하세요.")
@@ -858,9 +869,13 @@ def main(argv=None):
         menus = choose_menus(menus, unverified, args, not args.yes)
         fill_step(menus, args, not args.yes, Path(args.from_result).parent, diag.result_url(args.from_result))
         return
-    if not args.url and not args.yes:
-        return campaign(args)
-    single_run(args)
+    try:
+        if not args.url and not args.yes:
+            return campaign(args)
+        single_run(args)
+    except KeyboardInterrupt:
+        print()
+        sys.exit("  중단했습니다.")
 
 
 if __name__ == "__main__":

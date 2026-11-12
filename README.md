@@ -7,8 +7,8 @@
 ## 빠른 사용법 (Windows)
 
 1. Python 3.10 이상을 설치합니다. 설치할 때 "Add python.exe to PATH"를 체크하세요.
-2. `설치.bat`을 더블클릭합니다. 최초 1회만 하면 됩니다.
-3. `실행.bat`을 더블클릭하고 질문에 답합니다.
+2. `install.bat`을 더블클릭합니다. 최초 1회만 하면 됩니다.
+3. `run.bat`을 더블클릭하고 질문에 답합니다.
 
 ```
 수집할 사이트 주소: https://www.example.com
@@ -22,16 +22,16 @@
 - 로그인 단계에서 `a`를 누르면 아이디·비밀번호를 입력란에 자동으로 채웁니다. 로그인 버튼과 보안문자·OTP는 직접 처리합니다. 계정 정보는 저장하지 않습니다.
 - 끝나면 `결과\` 폴더에 엑셀이 저장됩니다. **구글 시트용 붙여넣기 데이터**는 클립보드로 복사되고 `.tsv` 파일로도 남습니다. 구글 시트 진단표에서 H13을 클릭하고 Ctrl+V 하세요.
 - 수집 중 **`q` 키**를 누르면 현재 페이지까지만 확인하고 멈춘 뒤 결과를 저장합니다. Windows에서는 Ctrl+C가 브라우저까지 종료시킬 수 있으므로 `q`를 권장합니다. 오류로 중단돼도 그때까지의 결과는 저장합니다.
-- 웹 화면이 편하면 `화면실행.bat`을 쓰세요. 보조 실행 방식이며 기능은 같습니다.
+- 웹 화면이 편하면 `run_web.bat`을 쓰세요. 보조 실행 방식이며 기능은 같습니다.
 
 ### 옵션으로 바로 실행
 
 ```bat
-실행.bat https://www.example.com --mode public --headless -y
-실행.bat https://www.example.com --mode compare --login-url https://www.example.com/login --username tester
+run.bat https://www.example.com --mode public --headless -y
+run.bat https://www.example.com --mode compare --login-url https://www.example.com/login --username tester
 ```
 
-주소에 `&`가 들어가면 큰따옴표로 감싸세요. 예: `실행.bat "https://site/?a=1&b=2"`. `--mode`는 `public`, `login`, `compare` 중 하나입니다. 그 밖에 `--max-pages`, `--max-seconds`, `--delay-ms`, `--extra-host`, `--selector`, `--out` 옵션이 있으며, 전체 목록은 `실행.bat --help`로 확인합니다.
+주소에 `&`가 들어가면 큰따옴표로 감싸세요. 예: `run.bat "https://site/?a=1&b=2"`. `--mode`는 `public`, `login`, `compare` 중 하나입니다. 그 밖에 `--max-pages`, `--max-seconds`, `--delay-ms`, `--extra-host`, `--selector`, `--out` 옵션이 있으며, 전체 목록은 `run.bat --help`로 확인합니다.
 
 ## 확정된 동작
 
@@ -52,8 +52,8 @@
 - 엑셀은 파일을 열 때 자동으로 다시 계산하고, 구글 시트는 가져올 때 다시 계산합니다.
 
 ```bat
-실행.bat https://www.example.com --mode public --workbook "진단.xlsx" --sheet 01_사이트A
-실행.bat --from-result "결과\사이트_메뉴목록.xlsx" --workbook "진단.xlsx" --sheet 02_사이트B
+run.bat https://www.example.com --mode public --workbook "진단.xlsx" --sheet 01_사이트A
+run.bat --from-result "결과\사이트_메뉴목록.xlsx" --workbook "진단.xlsx" --sheet 02_사이트B
 ```
 
 `--from-result`는 크롤링 없이, 이전에 만든 수집 결과 엑셀의 메뉴를 진단 시트에 입력합니다.
@@ -87,7 +87,7 @@
 | 3단계 제한·중복 정리 | 구현 |
 | 엑셀 출력·250개 분할, 구글 시트 붙여넣기(.tsv, 클립보드) | 구현. 클립보드 복사는 Windows 전용 |
 | 진단 엑셀 진단 시트에 직접 입력 (`--workbook`, `--from-result`) | 구현. 가상 양식 테스트와 실제 진단 양식(엑셀 수준 재계산·구글 시트 가져오기)으로 확인 |
-| 웹 화면 (`화면실행.bat`) | 보조 실행 방식. 기본 흐름 구현 |
+| 웹 화면 (`run_web.bat`) | 보조 실행 방식. 기본 흐름 구현 |
 | Windows 설치·실행 배치파일 | 작성. **Windows 실기 검증 전** |
 | 실제 대상 사이트 검증 | **미실시** |
 

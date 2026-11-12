@@ -370,7 +370,7 @@ async function exportExcel() {
 
 document.addEventListener("DOMContentLoaded", async () => {
   if (!token) {
-    showError("실행 링크의 접속 정보가 없습니다. ‘실행.bat’ 창에 표시된 주소로 다시 접속하세요.");
+    showError("실행 링크의 접속 정보가 없습니다. ‘run.bat’ 창에 표시된 주소로 다시 접속하세요.");
     return;
   }
   $$('input[name="mode"]').forEach(r => r.addEventListener("change", applyMode));

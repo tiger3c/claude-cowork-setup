@@ -30,7 +30,7 @@ if errorlevel 1 goto fail
 :browser_ok
 
 echo.
-echo 설치가 끝났습니다. 이제 실행.bat을 더블클릭하세요. (웹 화면이 편하면 화면실행.bat)
+echo 설치가 끝났습니다. 이제 run.bat을 더블클릭하세요. (웹 화면이 편하면 run_web.bat)
 pause
 exit /b 0
 

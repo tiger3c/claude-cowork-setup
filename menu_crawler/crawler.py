@@ -88,7 +88,7 @@ class Crawler:
             except BrowserError:
                 continue
         if not self.browser:
-            raise RuntimeError("브라우저를 열지 못했습니다. Edge/Chrome을 설치하거나 브라우저설치.bat를 실행하세요. 회사 브라우저 정책도 확인하세요.")
+            raise RuntimeError("브라우저를 열지 못했습니다. Edge/Chrome을 설치하거나 install_browser.bat를 실행하세요. 회사 브라우저 정책도 확인하세요.")
         self.context = self.browser.new_context(accept_downloads=False, viewport={"width": 1440, "height": 1000})
         self.context.on("page", lambda p: p.on("dialog", lambda dialog: dialog.dismiss()))
         self.page = self.context.new_page()

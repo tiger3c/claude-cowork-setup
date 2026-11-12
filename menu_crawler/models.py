@@ -21,8 +21,8 @@ class CrawlConfig(BaseModel):
     login_url: str = Field(default="", max_length=2000)
     site_name: str = Field(default="메뉴 수집", max_length=120)
     extra_hosts: list[str] = Field(default_factory=list, max_length=30)
-    max_pages: int = Field(default=300, ge=1, le=2000)
-    max_seconds: int = Field(default=1200, ge=10, le=7200)
+    max_pages: int = Field(default=0, ge=0, le=100000)      # 0 = 제한 없음
+    max_seconds: int = Field(default=0, ge=0, le=172800)    # 0 = 제한 없음
     max_hops: int = Field(default=6, ge=1, le=20)
     wait_ms: int = Field(default=700, ge=0, le=5000)
     delay_ms: int = Field(default=300, ge=0, le=5000)

@@ -365,16 +365,16 @@ class Crawler:
             if not page.is_closed():
                 self.harvest(page, 0, manual=True)
                 self.enqueue(canonical_url(page.url), 0)
-        deadline = time.monotonic() + self.config.max_seconds
+        deadline = time.monotonic() + self.config.max_seconds if self.config.max_seconds else None
         end_reason = ""
         while self.pending:
             if self.stop.is_set():
                 end_reason = "사용자가 수집을 중지했습니다."
                 break
-            if self.report.visited_count >= self.config.max_pages:
+            if self.config.max_pages and self.report.visited_count >= self.config.max_pages:
                 end_reason = "최대 방문 페이지 수에 도달했습니다."
                 break
-            if time.monotonic() >= deadline:
+            if deadline is not None and time.monotonic() >= deadline:
                 end_reason = "최대 수집 시간에 도달했습니다."
                 break
             url, hops = self.pending.popleft()

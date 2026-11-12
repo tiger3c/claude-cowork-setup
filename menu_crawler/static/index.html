@@ -95,8 +95,8 @@
             <input name="menu_selector" maxlength="500" placeholder="#gnb, .lnb">
             <small>메뉴를 잘 못 찾을 때만 입력합니다.</small>
           </label>
-          <label>최대 방문 페이지 수 <input name="max_pages" type="number" min="1" max="2000" value="300"></label>
-          <label>최대 수집 시간(초) <input name="max_seconds" type="number" min="10" max="7200" value="1200"></label>
+          <label>최대 방문 페이지 수 (0 = 제한 없음) <input name="max_pages" type="number" min="0" max="100000" value="0"></label>
+          <label>최대 수집 시간(초) (0 = 제한 없음) <input name="max_seconds" type="number" min="0" max="172800" value="0"></label>
           <label>최대 링크 이동 횟수 <input name="max_hops" type="number" min="1" max="20" value="6"></label>
           <label>페이지 로딩 후 대기(ms) <input name="wait_ms" type="number" min="0" max="5000" value="700"></label>
           <label>페이지 간 간격(ms) <input name="delay_ms" type="number" min="0" max="5000" value="300">

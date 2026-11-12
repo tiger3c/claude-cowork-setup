@@ -157,3 +157,13 @@ def test_console_text_has_no_ambiguous_symbols():
     import unicodedata
     assert not [c for c in text if ord(c) > 127 and unicodedata.east_asian_width(c) == "A"]
     assert ui.width(ui.fit("가나다라마바사", 9)) == 9
+
+
+def test_no_page_or_time_limit_by_default():
+    from menu_crawler import cli
+    from menu_crawler.models import CrawlConfig
+    config = CrawlConfig(url="https://example.com")
+    assert (config.max_pages, config.max_seconds) == (0, 0)
+    args = cli.parse_args([])
+    assert (args.max_pages, args.max_seconds) == (0, 0)
+    assert cli.limits(0, 0) == "페이지 수·시간 제한 없음"

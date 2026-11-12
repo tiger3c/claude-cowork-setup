@@ -42,7 +42,7 @@ run.bat https://www.example.com --mode public --headless -y
 run.bat https://www.example.com --mode compare --login-url https://www.example.com/login --username tester
 ```
 
-주소에 `&`가 들어가면 큰따옴표로 감싸세요. 예: `run.bat "https://site/?a=1&b=2"`. `--mode`는 `public`, `login`, `compare` 중 하나입니다. 그 밖에 `--max-pages`, `--max-seconds`, `--delay-ms`, `--extra-host`, `--selector`, `--out` 옵션이 있으며, 전체 목록은 `run.bat --help`로 확인합니다.
+주소에 `&`가 들어가면 큰따옴표로 감싸세요. 예: `run.bat "https://site/?a=1&b=2"`. `--mode`는 `public`, `login`, `compare` 중 하나입니다. 그 밖에 `--max-pages`, `--max-seconds`, `--delay-ms`, `--extra-host`, `--selector`, `--out` 옵션이 있으며, 전체 목록은 `run.bat --help`로 확인합니다. 방문 페이지 수와 수집 시간은 기본적으로 **제한 없음(0)**이며, 메뉴를 모두 확인하면 끝납니다. 필요할 때만 `--max-pages 500`처럼 제한을 겁니다.
 
 ## 확정된 동작
 

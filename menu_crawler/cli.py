@@ -50,6 +50,12 @@ def title(text):
 
 # ---------- 입력 받기 ----------
 
+def limits(pages, seconds):
+    if not pages and not seconds:
+        return "페이지 수·시간 제한 없음"
+    return f"페이지 {pages or '제한 없음'}{'개' if pages else ''} · 시간 {f'{seconds}초' if seconds else '제한 없음'}"
+
+
 def ask_url(initial, prompt="수집할 사이트 주소 (예: https://www.example.com)", default=""):
     url = initial
     while True:
@@ -93,8 +99,8 @@ def build_config(args):
     settings = {"max_pages": args.max_pages, "max_seconds": args.max_seconds, "max_hops": args.max_hops,
                 "wait_ms": args.wait_ms, "delay_ms": args.delay_ms}
     if interactive and ask_yes("고급 설정(방문 페이지 수·시간·간격)을 바꿀까요?"):
-        settings["max_pages"] = ask_int("  최대 방문 페이지 수", settings["max_pages"], 1, 2000)
-        settings["max_seconds"] = ask_int("  최대 수집 시간(초)", settings["max_seconds"], 10, 7200)
+        settings["max_pages"] = ask_int("  최대 방문 페이지 수 (0 = 제한 없음)", settings["max_pages"], 0, 100000)
+        settings["max_seconds"] = ask_int("  최대 수집 시간(초) (0 = 제한 없음)", settings["max_seconds"], 0, 172800)
         settings["max_hops"] = ask_int("  최대 링크 이동 횟수", settings["max_hops"], 1, 20)
         settings["delay_ms"] = ask_int("  페이지 간 간격(ms, 서버 부담을 줄이려면 늘리기)", settings["delay_ms"], 0, 5000)
         hosts = ask("  추가 허용 호스트 (쉼표로 구분, 없으면 Enter)")
@@ -118,7 +124,7 @@ def build_config(args):
     print(f"  수집 방식  : {MODES[config.mode]}")
     if config.mode != "public":
         print(f"  로그인 주소: {config.login_url or '(사이트 주소에서 직접 이동)'}")
-    print(f"  제한       : 페이지 {config.max_pages}개 · {config.max_seconds}초 · 이동 {config.max_hops}회")
+    print(f"  제한       : {limits(config.max_pages, config.max_seconds)} · 이동 {config.max_hops}회")
     line()
     if not args.yes and not ask_yes("수집 대상 사이트에 대한 점검 권한(계약·승인)을 확인했고, 이대로 시작할까요?", True):
         sys.exit("취소했습니다.")
@@ -157,7 +163,8 @@ def wait(job, quiet=False):
                 print("\n  중지 요청: 현재 페이지까지만 확인하고 멈춥니다...")
                 job.stop.set()
             if not quiet:
-                pages = f"{data['visited_count']}/{data['config']['max_pages']}"
+                cap = data["config"]["max_pages"]
+                pages = f"{data['visited_count']}/{cap}" if cap else f"{data['visited_count']}페이지"
                 current = data.get("current_url", "")
                 text = ui.fit(f"  [{pages}] 메뉴 {len(data['menus'])}개 · {current}", width)
                 if text != last:
@@ -556,8 +563,8 @@ def parse_args(argv=None):
     p.add_argument("--name", default="", help="대상 이름")
     p.add_argument("--out", default="", help="저장할 엑셀 파일 경로 (기본: 결과 폴더)")
     p.add_argument("--username", help="로그인 단계에서 자동 입력할 아이디 (비밀번호는 실행 중에 따로 물어봄)")
-    p.add_argument("--max-pages", type=int, default=300)
-    p.add_argument("--max-seconds", type=int, default=1200)
+    p.add_argument("--max-pages", type=int, default=0, help="최대 방문 페이지 수 (0 = 제한 없음, 기본)")
+    p.add_argument("--max-seconds", type=int, default=0, help="대상별 최대 수집 시간(초) (0 = 제한 없음, 기본)")
     p.add_argument("--max-hops", type=int, default=6)
     p.add_argument("--wait-ms", type=int, default=700)
     p.add_argument("--delay-ms", type=int, default=300)
@@ -703,15 +710,16 @@ def campaign(args):
                 "wait_ms": args.wait_ms, "delay_ms": args.delay_ms}
     print()
     if ask_yes("  고급 설정(방문 페이지 수, 시간, 간격)을 바꿀까요?"):
-        settings["max_pages"] = ask_int("    최대 방문 페이지 수", settings["max_pages"], 1, 2000)
-        settings["max_seconds"] = ask_int("    대상별 최대 수집 시간(초)", settings["max_seconds"], 10, 7200)
+        settings["max_pages"] = ask_int("    최대 방문 페이지 수 (0 = 제한 없음)", settings["max_pages"], 0, 100000)
+        settings["max_seconds"] = ask_int("    대상별 최대 수집 시간(초) (0 = 제한 없음)", settings["max_seconds"], 0, 172800)
         settings["delay_ms"] = ask_int("    페이지 간 간격(ms)", settings["delay_ms"], 0, 5000)
 
     ui.header("작업 순서 확인", board.label)
     ui.table([("순서", 4), ("진단 시트", 30), ("점검 주소", 0)],
              [[str(i), t.sheet or "진단 시트", url] for i, (t, url, _) in enumerate(plan, 1)])
     print()
-    print(f"  수집 방식: {MODES[mode]} | 대상별 최대 {settings['max_pages']}페이지, {settings['max_seconds']}초")
+    print(f"  수집 방식: {MODES[mode]} | {limits(settings['max_pages'], settings['max_seconds'])}")
+    print("  " + ui.dim("메뉴를 모두 확인하면 자동으로 끝납니다. 중간에 멈추려면 q (그때까지 결과는 저장)"))
     if mode != "public":
         print("  " + ui.dim("대상마다 브라우저 창이 열리면 직접 로그인한 뒤 이 창에서 Enter를 누릅니다."))
     if any(t.save_domain for t, _, _ in plan):

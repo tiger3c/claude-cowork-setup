@@ -21,7 +21,7 @@
 - 방식별로 필요한 것만 묻습니다. 로그인 방식이면 로그인 페이지 주소를 묻고, 열린 브라우저 창에서 로그인한 뒤 Enter를 누르면 됩니다.
 - 로그인 단계에서 `a`를 누르면 아이디·비밀번호를 입력란에 자동으로 채웁니다. 로그인 버튼과 보안문자·OTP는 직접 처리합니다. 계정 정보는 저장하지 않습니다.
 - 끝나면 `결과\` 폴더에 엑셀이 저장됩니다. **구글 시트용 붙여넣기 데이터**는 클립보드로 복사되고 `.tsv` 파일로도 남습니다. 구글 시트 진단표에서 H13을 클릭하고 Ctrl+V 하세요.
-- 수집 중 `Ctrl+C`를 누르면 현재 페이지까지만 확인하고 멈춘 뒤 결과를 저장합니다.
+- 수집 중 **`q` 키**를 누르면 현재 페이지까지만 확인하고 멈춘 뒤 결과를 저장합니다. Windows에서는 Ctrl+C가 브라우저까지 종료시킬 수 있으므로 `q`를 권장합니다. 오류로 중단돼도 그때까지의 결과는 저장합니다.
 - 웹 화면이 편하면 `화면실행.bat`을 쓰세요. 보조 실행 방식이며 기능은 같습니다.
 
 ### 옵션으로 바로 실행
@@ -31,7 +31,7 @@
 실행.bat https://www.example.com --mode compare --login-url https://www.example.com/login --username tester
 ```
 
-`--mode`는 `public`, `login`, `compare` 중 하나입니다. 그 밖에 `--max-pages`, `--max-seconds`, `--delay-ms`, `--extra-host`, `--selector`, `--out` 옵션이 있으며, 전체 목록은 `실행.bat --help`로 확인합니다.
+주소에 `&`가 들어가면 큰따옴표로 감싸세요. 예: `실행.bat "https://site/?a=1&b=2"`. `--mode`는 `public`, `login`, `compare` 중 하나입니다. 그 밖에 `--max-pages`, `--max-seconds`, `--delay-ms`, `--extra-host`, `--selector`, `--out` 옵션이 있으며, 전체 목록은 `실행.bat --help`로 확인합니다.
 
 ## 확정된 동작
 

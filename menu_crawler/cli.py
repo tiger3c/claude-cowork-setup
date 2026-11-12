@@ -5,7 +5,9 @@ Every question can also be answered with a command-line option for repeat runs.
 """
 import argparse
 import getpass
+import ctypes
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -145,20 +147,41 @@ def build_config(args):
 
 # ---------- 진행 ----------
 
+class EngineError(Exception):
+    """The browser engine failed; the partial result is still worth saving."""
+
+
+def stop_key_pressed():
+    """Windows: 'q' stops safely. (Ctrl+C there also reaches the browser driver and can kill it.)"""
+    if os.name != "nt":
+        return False
+    import msvcrt
+    pressed = False
+    while msvcrt.kbhit():
+        pressed |= msvcrt.getwch().lower() in {"q", "ㅂ"}
+    return pressed
+
+
 def wait(job, quiet=False):
-    """Wait while the engine is busy, printing one progress line. Ctrl+C asks the engine to stop."""
+    """Wait while the engine is busy, printing one progress line. q or Ctrl+C asks the engine to stop."""
     last = ""
+    width = max(40, shutil.get_terminal_size((100, 20)).columns - 1)
+    if not quiet and os.name == "nt":
+        print("  (중지하려면 q 키를 누르세요. 지금까지의 결과는 저장됩니다.)")
     try:
         while True:
             data = job.snapshot()
             if data["state"] not in BUSY:
                 break
+            if stop_key_pressed() and not job.stop.is_set():
+                print("\n  중지 요청: 현재 페이지까지만 확인하고 멈춥니다...")
+                job.stop.set()
             if not quiet:
                 pages = f"{data['visited_count']}/{data['config']['max_pages']}"
                 current = data.get("current_url", "")
-                text = f"  [{pages}] 메뉴 {len(data['menus'])}개 · {current}"[:110]
+                text = f"  [{pages}] 메뉴 {len(data['menus'])}개 · {current}"[:width]
                 if text != last:
-                    print("\r" + text.ljust(110), end="", flush=True)
+                    print("\r" + text.ljust(width), end="", flush=True)
                     last = text
             time.sleep(0.4)
     except KeyboardInterrupt:
@@ -170,7 +193,7 @@ def wait(job, quiet=False):
         print()
     data = job.snapshot()
     if data["state"] == "error":
-        sys.exit("실행 오류: " + data["message"])
+        raise EngineError(data["message"])
     return data
 
 
@@ -270,11 +293,23 @@ def tree(menus, limit=40):
 
 
 def save(data, out):
-    path = Path(out) if out else Path("결과") / (
-        "".join("_" if c in '\\/:*?"<>|' else c for c in data["config"]["site_name"])
-        + f"_메뉴목록_{datetime.now():%Y%m%d_%H%M}.xlsx")
+    if out:
+        path = Path(out)
+    else:
+        name = "".join("_" if c in '\\/:*?"<>|' else c for c in data["config"]["site_name"]).strip(" .") or "메뉴수집"
+        base = Path("결과") / f"{name}_메뉴목록_{datetime.now():%Y%m%d_%H%M%S}"
+        path, n = base.with_suffix(".xlsx"), 2
+        while path.exists():
+            path, n = base.with_name(f"{base.name}_{n}.xlsx"), n + 1
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(make_workbook(data))
+    content = make_workbook(data)
+    try:
+        path.write_bytes(content)
+    except PermissionError:
+        # Usually the same file is open in Excel on Windows.
+        path = path.with_name(f"{path.stem}_{datetime.now():%H%M%S}{path.suffix}")
+        print(f"  ※ 같은 이름의 파일이 열려 있어 다른 이름으로 저장합니다: {path.name}")
+        path.write_bytes(content)
     return path.resolve()
 
 
@@ -300,11 +335,52 @@ def paste_blocks(data, size=250):
 def copy_to_clipboard(text):
     if os.name != "nt":
         return False
+    text = text.rstrip("\r\n")  # a trailing newline would paste an empty 4th row
+    return win32_clipboard(text) or powershell_clipboard(text)
+
+
+def win32_clipboard(text):
+    """Copy as CF_UNICODETEXT through the Win32 API (no PowerShell needed)."""
+    try:
+        user32, kernel32 = ctypes.WinDLL("user32"), ctypes.WinDLL("kernel32")
+        kernel32.GlobalAlloc.restype = ctypes.c_void_p
+        kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+        kernel32.GlobalLock.restype = ctypes.c_void_p
+        kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+        kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+        kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
+        user32.SetClipboardData.restype = ctypes.c_void_p
+        user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+        data = text.encode("utf-16-le") + b"\x00\x00"
+        for _ in range(10):  # another program may hold the clipboard for a moment
+            if user32.OpenClipboard(None):
+                break
+            time.sleep(0.1)
+        else:
+            return False
+        try:
+            user32.EmptyClipboard()
+            handle = kernel32.GlobalAlloc(0x0002, len(data))  # GMEM_MOVEABLE
+            pointer = kernel32.GlobalLock(handle)
+            ctypes.memmove(pointer, data, len(data))
+            kernel32.GlobalUnlock(handle)
+            if not user32.SetClipboardData(13, handle):  # CF_UNICODETEXT
+                kernel32.GlobalFree(handle)
+                return False
+            return True
+        finally:
+            user32.CloseClipboard()
+    except (OSError, AttributeError):
+        return False
+
+
+def powershell_clipboard(text):
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", delete=False) as f:
         f.write(text)
         temp = f.name
     try:
-        command = f"Get-Content -Raw -Encoding UTF8 -LiteralPath '{temp}' | Set-Clipboard"
+        quoted = temp.replace("'", "''")
+        command = f"Get-Content -Raw -Encoding UTF8 -LiteralPath '{quoted}' | Set-Clipboard"
         return subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
                               capture_output=True, timeout=20).returncode == 0
     except (OSError, subprocess.SubprocessError):
@@ -407,14 +483,16 @@ def main(argv=None):
             else:
                 data = job.snapshot()
         finish(data, args)
-    except KeyboardInterrupt:
-        print("\n  중단했습니다.")
+    except (KeyboardInterrupt, EngineError) as exc:
+        print(f"\n  실행 오류: {exc}" if isinstance(exc, EngineError) else "\n  중단했습니다.")
         job.stop.set()
         data = job.snapshot()
         if data["menus"]:
             print("  지금까지 수집한 결과를 저장합니다.")
-            args.yes = True  # no more questions after Ctrl+C
+            args.yes = True  # no more questions after an interruption
             finish(data, args)
+        elif isinstance(exc, EngineError):
+            sys.exit(1)
     finally:
         job.close()
         job.thread.join(timeout=10)

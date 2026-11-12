@@ -390,37 +390,92 @@ def powershell_clipboard(text):
         os.unlink(temp)
 
 
-def google_sheet_step(data, excel_path, interactive):
-    blocks = paste_blocks(data)
-    if not blocks:
-        print("  붙여넣을 메뉴가 없습니다. 엑셀의 '미수집_확인필요' 시트를 확인하세요.")
-        return
-    files = []
-    for i, block in enumerate(blocks, 1):
-        path = excel_path.with_name(f"{excel_path.stem}_구글시트붙여넣기_{i:02}.tsv")
-        path.write_text(block, encoding="utf-8")
-        files.append(path)
-    title("구글 시트에 붙여넣기")
-    print(f"  진단 메뉴 {len(select_menus(data))}개 · {len(blocks)}묶음 (묶음당 최대 250개 = H~IW열)")
-    print("  방법: 구글 시트 진단표에서 H13 셀 클릭 → Ctrl+V")
-    print("        (1행=1 Depth, 2행=2 Depth, 3행=3 Depth로 H13:15에 가로로 들어갑니다)")
-    for i, path in enumerate(files, 1):
-        print(f"  붙여넣기 파일 {i}: {path}")
-    if not interactive:
-        return
-    if os.name != "nt":
-        print("  ※ 이 PC에서는 자동 복사를 지원하지 않습니다. 위 .tsv 파일 내용을 복사해 붙여넣으세요.")
-        return
-    for i, block in enumerate(blocks, 1):
-        label = f"{i}/{len(blocks)}묶음" + (" (다음 진단 시트용)" if i > 1 else "")
-        if not ask_yes(f"  {label}을 클립보드에 복사할까요?", True):
-            continue
+def google_paste_step(menus, args, interactive, out_dir):
+    """Prepare a paste block for a Google Sheets 진단 시트 and tell exactly where to paste it."""
+    snapshot, sheet = args.snapshot, args.sheet
+    if not snapshot and interactive:
+        print()
+        print("  붙여넣을 위치를 정확히 계산하려면 구글 시트를 엑셀로 내려받은 파일이 필요합니다.")
+        print("  (구글 시트 → 파일 → 다운로드 → Microsoft Excel(.xlsx))")
+        snapshot = ask_path("  내려받은 파일 경로 (메뉴가 없는 빈 진단 시트에 붙여넣을 거면 Enter)")
+    if snapshot:
+        book = diag.Workbook(snapshot)
+        if not sheet:
+            if not interactive:
+                sys.exit("--sheet 로 붙여넣을 진단 시트를 지정하세요.")
+            sheet = pick_sheet(book)
+        try:
+            sheet = diag.resolve_sheet(book, sheet)
+        except ValueError as exc:
+            sys.exit(str(exc))
+    p = diag.plan_paste(snapshot or None, sheet, menus)
+    title("구글 시트에 붙여넣기" + (f" · {sheet}" if sheet else ""))
+    if not p.menus:
+        print("  붙여넣을 새 메뉴가 없습니다." + (f" (이미 있는 메뉴 {len(p.duplicates)}개)" if p.duplicates else ""))
+        return None
+    cell = f"{diag.L(p.start)}13"
+    last = diag.L(p.start + len(p.menus) - 1)
+    if p.checked:
+        print(f"  시트에 이미 있는 메뉴 {p.existing}개 · 새로 붙여넣을 메뉴 {len(p.menus)}개 · 이미 있어 뺀 메뉴 {len(p.duplicates)}개")
+    else:
+        print(f"  붙여넣을 메뉴 {len(p.menus)}개")
+        print("  ※ 메뉴가 없는 빈 진단 시트에만 붙여넣으세요. 메뉴가 있는 시트에 붙여넣으면 기존 메뉴를 덮어씁니다.")
+    where = f"‘{sheet}’ 시트의 " if sheet else "진단 시트의 "
+    print(f"  방법: {where}{cell} 칸을 클릭 → Ctrl+V  (채워지는 범위 {cell}:{last}15)")
+    block = diag.paste_text(p.menus)
+    base = Path(out_dir) / f"구글시트붙여넣기_{sheet or '진단시트'}_{datetime.now():%Y%m%d_%H%M%S}"
+    tsv = base.with_suffix(".tsv")
+    tsv.write_text(block + "\r\n", encoding="utf-8")
+    print(f"  붙여넣기 파일: {tsv.resolve()}")
+    record = diag.Plan(sheet or "", [], p.existing, list(zip(range(p.start, p.start + len(p.menus)), p.menus)), p.duplicates, p.overflow)
+    rec = diag.receipt(record, base.with_name(base.name + "_입력내역.tsv"))
+    print(f"  입력 내역: {rec.resolve()}")
+    if p.overflow:
+        print(f"  ※ 칸이 부족해 넣지 못한 메뉴 {len(p.overflow)}개는 입력 내역 파일에 '칸 부족'으로 남겼습니다.")
+    if os.name == "nt":
         if copy_to_clipboard(block):
-            print("  ✔ 복사했습니다. 구글 시트 H13을 클릭하고 Ctrl+V 하세요.")
+            print(f"  ✔ 클립보드에 복사했습니다. 구글 시트에서 {cell} 칸을 클릭하고 Ctrl+V 하세요.")
         else:
-            print("  복사에 실패했습니다. 위 .tsv 파일을 메모장으로 열어 전체 복사하세요.")
-        if i < len(blocks):
-            ask("  붙여넣었으면 Enter")
+            print("  클립보드 복사에 실패했습니다. 붙여넣기 파일을 메모장으로 열어 전체 복사하세요.")
+    else:
+        print("  ※ 이 PC에서는 자동 복사를 지원하지 않습니다. 붙여넣기 파일 내용을 복사해 붙여넣으세요.")
+    return tsv
+
+
+def pick_sheet(book):
+    sheets = book.site_sheets()
+    print()
+    print("  번호) 진단 시트                     기존 메뉴 / 빈 칸")
+    for i, name in enumerate(sheets, 1):
+        menus_n, free_n = diag.sheet_summary(book, name)
+        print(f"  {i:3}) {name[:28]:30} {menus_n:5} / {free_n}")
+    while True:
+        pick = ask("  메뉴를 넣을 진단 시트 번호")
+        if pick.isdigit() and 1 <= int(pick) <= len(sheets):
+            return sheets[int(pick) - 1]
+        print("  목록의 번호를 입력하세요.")
+
+
+def fill_step(menus, args, interactive, out_dir):
+    """크롤링 결과를 진단표에 기입: 구글 시트(붙여넣기) 또는 엑셀 파일(자동 입력)."""
+    target = args.target
+    if not target:
+        if args.workbook:
+            target = "excel"
+        elif not interactive:
+            target = "google"
+        else:
+            print()
+            print("  진단표 기입 방법을 선택하세요.")
+            print("    1) 구글 시트에 붙여넣기 (클립보드 복사 + 붙여넣을 칸 안내)")
+            print("    2) 엑셀 파일(.xlsx/.xlsm)에 바로 입력")
+            print("    3) 건너뛰기")
+            target = {"1": "google", "2": "excel"}.get(ask("  번호", "1"), "none")
+    if target == "google":
+        return google_paste_step(menus, args, interactive, out_dir)
+    if target == "excel":
+        return workbook_step(menus, args, interactive)
+    return None
 
 
 # ---------- 실행 ----------
@@ -447,6 +502,8 @@ def parse_args(argv=None):
     p.add_argument("--workbook", default="", help="메뉴를 입력할 진단 엑셀(.xlsx) 경로")
     p.add_argument("--sheet", default="", help="메뉴를 입력할 진단 시트 이름 (예: 01_사이트A)")
     p.add_argument("--workbook-out", default="", help="메뉴를 입력한 진단 엑셀을 저장할 경로 (기본: 원본 옆에 새 파일)")
+    p.add_argument("--target", choices=["google", "excel"], help="진단표 기입 방법: google=구글 시트 붙여넣기, excel=엑셀 파일 직접 입력")
+    p.add_argument("--snapshot", default="", help="구글 시트를 엑셀로 내려받은 파일 (붙여넣을 위치·중복 계산용)")
     p.add_argument("--include-unverified", action="store_true", help="로그인 필요·접속 실패 등으로 확인하지 못한 메뉴도 진단 시트에 입력")
     p.add_argument("--from-result", default="", help="크롤링 없이, 이전에 만든 수집 결과 엑셀의 메뉴를 진단 엑셀에 입력")
     return p.parse_args(argv)
@@ -485,22 +542,11 @@ def workbook_step(menus, args, interactive):
         if not path:
             return None
     book = diag.Workbook(path)
-    sheets = book.site_sheets()
     sheet = args.sheet
     if not sheet:
         if not interactive:
             sys.exit("--sheet 로 진단 시트 이름을 지정하세요. 예: --sheet 01_사이트A")
-        print()
-        print("  번호) 진단 시트                     기존 메뉴 / 빈 칸")
-        for i, name in enumerate(sheets, 1):
-            menus_n, free_n = diag.sheet_summary(book, name)
-            print(f"  {i:3}) {name[:28]:30} {menus_n:5} / {free_n}")
-        while True:
-            pick = ask("  메뉴를 넣을 진단 시트 번호")
-            if pick.isdigit() and 1 <= int(pick) <= len(sheets):
-                sheet = sheets[int(pick) - 1]
-                break
-            print("  목록의 번호를 입력하세요.")
+        sheet = pick_sheet(book)
     try:
         sheet = diag.resolve_sheet(book, sheet)
     except ValueError as exc:
@@ -541,10 +587,8 @@ def finish(data, args):
     path = save(data, args.out)
     print()
     print(f"  엑셀 저장: {path}")
-    google_sheet_step(data, path, not args.yes)
     confirmed, unverified = diag.menus_from_report(data, include_unverified=True)
-    if args.workbook or not args.yes:
-        workbook_step(choose_menus(confirmed, unverified, args, not args.yes), args, not args.yes)
+    fill_step(choose_menus(confirmed, unverified, args, not args.yes), args, not args.yes, Path(path).parent)
     if os.name == "nt" and not args.no_open and not args.yes and ask_yes("전체 메뉴 엑셀 파일을 열까요?", False):
         os.startfile(path)  # noqa: S606 - Windows only, local result file
 
@@ -565,11 +609,7 @@ def main(argv=None):
             sys.exit(f"수집 결과 파일을 읽을 수 없습니다: {exc}")
         print(f"  수집 결과에서 진단 메뉴 {len(menus)}개를 읽었습니다.")
         menus = choose_menus(menus, unverified, args, not args.yes)
-        if not args.workbook:
-            args.workbook = ask_path("  진단 엑셀(.xlsx/.xlsm) 경로") if not args.yes else ""
-            if not args.workbook:
-                sys.exit("--workbook 으로 진단 엑셀 경로를 지정하세요.")
-        workbook_step(menus, args, not args.yes)
+        fill_step(menus, args, not args.yes, Path(args.from_result).parent)
         return
     config = build_config(args)
 

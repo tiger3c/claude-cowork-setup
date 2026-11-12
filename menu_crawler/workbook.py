@@ -327,3 +327,53 @@ def receipt(p, path):
     lines += ["칸 부족\t\t" + "\t".join(d) for d in p.overflow]
     Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
     return Path(path)
+
+
+@dataclass
+class PastePlan:
+    start: int                      # first column to paste into (H.. IW)
+    menus: list[list[str]]
+    duplicates: list[list[str]]
+    overflow: list[list[str]]
+    existing: int
+    checked: bool                   # True when the sheet's current state was read from a downloaded copy
+
+
+def plan_paste(snapshot, sheet, menus):
+    """Where to paste in a Google Sheets 진단 시트: right after its last used menu column.
+
+    snapshot is the Google sheet downloaded as .xlsx (or None when the sheet is known to be empty).
+    Columns to the right of the last used one are all free, so the pasted block is contiguous.
+    """
+    existing, start = set(), FIRST_COL
+    if snapshot:
+        wb = Workbook(snapshot)
+        grid = wb.grid(sheet)
+        used = {c for c, _ in grid}
+        if used:
+            start = max(used) + 1
+        for col in used:
+            key = tuple(clean(grid.get((col, r), "")) for r in MENU_ROWS)
+            if any(key):
+                existing.add(key)
+    new, dup, seen = [], [], set()
+    for menu in menus:
+        depths = [clean(x) for x in (list(menu) + ["", "", ""])[:3]]
+        key = tuple(depths)
+        if not depths[0]:
+            continue
+        if key in existing or key in seen:
+            dup.append(depths)
+            continue
+        seen.add(key)
+        new.append(depths)
+    room = max(0, LAST_COL - start + 1)
+    return PastePlan(start, new[:room], dup, new[room:], len(existing), bool(snapshot))
+
+
+def paste_text(menus):
+    """3 rows (1/2/3 Depth) x N columns, tab separated; values never start a formula in Sheets."""
+    def cell(v):
+        v = clean(v)
+        return "'" + v if v[:1] in ("=", "+", "-", "@") else v
+    return "\r\n".join("\t".join(cell(m[i]) for m in menus) for i in range(3))

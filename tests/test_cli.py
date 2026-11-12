@@ -38,7 +38,7 @@ def test_non_interactive_public_run(site, tmp_path, monkeypatch):  # noqa: F811
     wb = load_workbook(out)
     names = [c.value for c in wb["진단메뉴_01"][13][7:]]
     assert "고객센터" in names and "계좌" not in names
-    tsv = (tmp_path / "result_구글시트붙여넣기_01.tsv").read_bytes().decode("utf-8")
+    tsv = next(tmp_path.glob("구글시트붙여넣기_*[0-9].tsv")).read_bytes().decode("utf-8")
     assert tsv.split("\r\n")[1].split("\t")[names.index("고객센터")] == "공지사항"
 
 

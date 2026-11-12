@@ -133,3 +133,27 @@ def test_sheet_lookup_summary_and_receipt(tmp_path):
     rec = diag.receipt(p, tmp_path / "r.tsv").read_text(encoding="utf-8-sig").splitlines()
     assert rec[0].startswith("구분") and rec[1] == "입력\tJ\t조회\t\t"
     assert sum(1 for x in rec if x.startswith("이미 있음")) == 1 and sum(1 for x in rec if x.startswith("칸 부족")) == 3
+
+
+def test_google_paste_plan_starts_after_last_used_column(tmp_path):
+    book = diagnosis_book(tmp_path / "diag.xlsx")       # 01_테스트: H has a menu, I has a result only
+    p = diag.plan_paste(book, "01_테스트", [["기존", "하위"], ["=조회", "계좌"], ["이체"], ["이체"]])
+    assert diag.L(p.start) == "J" and p.checked and p.existing == 1
+    assert p.menus == [["=조회", "계좌", ""], ["이체", "", ""]] and len(p.duplicates) == 2
+    assert diag.paste_text(p.menus).split("\r\n") == ["'=조회\t이체", "계좌\t", "\t"]
+    blank = diag.plan_paste(None, None, [[f"m{i}"] for i in range(252)])
+    assert diag.L(blank.start) == "H" and len(blank.menus) == 250 and len(blank.overflow) == 2 and not blank.checked
+
+
+def test_cli_google_target_with_snapshot(tmp_path):
+    menus = [Menu("a", ["조회"], "https://example.test/a", "", "메뉴 DOM", status="수집됨"),
+             Menu("b", ["기존", "하위"], "https://example.test/b", "", "메뉴 DOM", status="수집됨")]
+    report = Report(config=CrawlConfig(url="https://example.test").model_dump(), menus=menus, state="complete").to_dict()
+    result = tmp_path / "result.xlsx"
+    result.write_bytes(make_workbook(report))
+    snap = diagnosis_book(tmp_path / "snapshot.xlsx")
+    cli.main(["--from-result", str(result), "--target", "google", "--snapshot", str(snap), "--sheet", "1", "-y"])
+    tsv = next(tmp_path.glob("구글시트붙여넣기_01_테스트_*[0-9].tsv")).read_bytes().decode("utf-8")
+    assert tsv.split("\r\n")[0] == "조회"                    # '기존 > 하위' is already on the sheet
+    rec = next(tmp_path.glob("구글시트붙여넣기_01_테스트_*_입력내역.tsv")).read_text(encoding="utf-8-sig")
+    assert "입력\tJ\t조회" in rec and "이미 있음" in rec

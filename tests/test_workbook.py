@@ -97,3 +97,23 @@ def test_control_characters_xlsm_and_wrong_result_file(tmp_path):
     assert diag.write(xlsm, tmp_path / "out.xlsm", diag.plan(xlsm, "02_빈시트", [["조회"]])).suffix == ".xlsm"
     with pytest.raises(ValueError):
         diag.menus_from_result(book)             # a diagnosis workbook is not a crawl result
+
+
+def test_unverified_navigation_menus_can_be_included(tmp_path):
+    menus = [Menu("a", ["조회"], "https://example.test/a", "", "메뉴 DOM", status="수집됨"),
+             Menu("b", ["마이페이지"], "https://example.test/my", "", "메뉴 DOM", status="로그인 필요"),
+             Menu("c", ["로그아웃"], "https://example.test/logout", "", "메뉴 DOM", status="동작 확인 필요"),
+             Menu("d", ["이벤트"], "https://example.test/e", "", "일반 링크", status="로그인 필요", hierarchy_review=True)]
+    report = Report(config=CrawlConfig(url="https://example.test").model_dump(), menus=menus, state="complete").to_dict()
+    confirmed, unverified = diag.menus_from_report(report, include_unverified=True)
+    assert confirmed == [["조회", "", ""]]
+    assert unverified == [(["마이페이지", "", ""], "로그인 필요")]     # logout and body links stay out
+    result = tmp_path / "result.xlsx"
+    result.write_bytes(make_workbook(report))
+    assert diag.unverified_from_result(result) == [(["마이페이지", "", ""], "로그인 필요")]
+    book = diagnosis_book(tmp_path / "diag.xlsx")
+    out = tmp_path / "filled.xlsx"
+    cli.main(["--from-result", str(result), "--workbook", str(book), "--sheet", "02_빈시트",
+              "--workbook-out", str(out), "--include-unverified", "-y"])
+    ws = load_workbook(out)["02_빈시트"]
+    assert [ws["H13"].value, ws["I13"].value, ws["J13"].value] == ["조회", "마이페이지", None]

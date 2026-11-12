@@ -257,3 +257,38 @@ def menus_from_result(path):
                 out.append(depths)
     wb.close()
     return out
+
+
+# Menus whose names come from the site's navigation but whose page could not be confirmed
+# (login wall, permission, connection failure, crawl limit). They are real menus for the diagnosis list.
+UNVERIFIED = {"로그인 필요", "로그인·권한 확인", "접속 실패", "미방문"}
+
+
+def menus_from_report(report, include_unverified=False):
+    """(confirmed, unverified) menu lists from a crawl report, in tree order."""
+    from .export import select_menus
+    confirmed = [m["depths"] for m in select_menus(report)]
+    unverified = []
+    if include_unverified:
+        for m in report["menus"]:
+            if (not m["ready"] and m["kind"] == "link" and m["evidence"] == "메뉴 DOM" and not m["hierarchy_review"]
+                    and 1 <= len(m["path"]) <= 3 and m["status"] in UNVERIFIED):
+                unverified.append(([clean(x) for x in (m["path"] + ["", "", ""])[:3]], m["status"]))
+    return confirmed, unverified
+
+
+def unverified_from_result(path):
+    """Unverified navigation menus from the 전체메뉴 sheet of a crawl result file."""
+    from openpyxl import load_workbook
+    wb = load_workbook(path, read_only=True, data_only=True)
+    out = []
+    if "전체메뉴" in wb.sheetnames:
+        rows = wb["전체메뉴"].iter_rows(values_only=True)
+        head = list(next(rows))
+        col = {name: head.index(name) for name in ("1 Depth", "2 Depth", "3 Depth", "구분", "수집 상태", "구조 검토", "발견 근거")}
+        for row in rows:
+            if (row[col["구분"]] == "페이지 메뉴" and row[col["발견 근거"]] == "메뉴 DOM" and row[col["구조 검토"]] != "필요"
+                    and row[col["수집 상태"]] in UNVERIFIED and row[col["1 Depth"]]):
+                out.append(([clean(row[col[k]]) for k in ("1 Depth", "2 Depth", "3 Depth")], row[col["수집 상태"]]))
+    wb.close()
+    return out

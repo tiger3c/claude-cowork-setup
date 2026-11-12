@@ -447,6 +447,7 @@ def parse_args(argv=None):
     p.add_argument("--workbook", default="", help="메뉴를 입력할 진단 엑셀(.xlsx) 경로")
     p.add_argument("--sheet", default="", help="메뉴를 입력할 진단 시트 이름 (예: 01_사이트A)")
     p.add_argument("--workbook-out", default="", help="메뉴를 입력한 진단 엑셀을 저장할 경로 (기본: 원본 옆에 새 파일)")
+    p.add_argument("--include-unverified", action="store_true", help="로그인 필요·접속 실패 등으로 확인하지 못한 메뉴도 진단 시트에 입력")
     p.add_argument("--from-result", default="", help="크롤링 없이, 이전에 만든 수집 결과 엑셀의 메뉴를 진단 엑셀에 입력")
     return p.parse_args(argv)
 
@@ -459,6 +460,19 @@ def ask_path(prompt):
         if Path(value).is_file() and value.lower().endswith((".xlsx", ".xlsm")):
             return value
         print("  .xlsx 또는 .xlsm 파일 경로를 확인하세요. (파일을 이 창으로 끌어다 놓아도 됩니다)")
+
+
+def choose_menus(confirmed, unverified, args, interactive):
+    """confirmed + (optionally) navigation menus that could not be confirmed, e.g. behind a login."""
+    if not unverified:
+        return confirmed
+    if not args.include_unverified and interactive:
+        from collections import Counter
+        kinds = " · ".join(f"{k} {n}" for k, n in Counter(s for _, s in unverified).most_common())
+        print()
+        print(f"  메뉴 구조에서 이름은 확인했지만 페이지를 확인하지 못한 메뉴 {len(unverified)}개 ({kinds})")
+        args.include_unverified = ask_yes("  이 메뉴도 진단 시트에 넣을까요?", True)
+    return confirmed + [d for d, _ in unverified] if args.include_unverified else confirmed
 
 
 def workbook_step(menus, args, interactive):
@@ -517,7 +531,9 @@ def finish(data, args):
     print()
     print(f"  엑셀 저장: {path}")
     google_sheet_step(data, path, not args.yes)
-    workbook_step([m["depths"] for m in select_menus(data)], args, not args.yes)
+    confirmed, unverified = diag.menus_from_report(data, include_unverified=True)
+    if args.workbook or not args.yes:
+        workbook_step(choose_menus(confirmed, unverified, args, not args.yes), args, not args.yes)
     if os.name == "nt" and not args.no_open and not args.yes and ask_yes("전체 메뉴 엑셀 파일을 열까요?", False):
         os.startfile(path)  # noqa: S606 - Windows only, local result file
 
@@ -532,8 +548,10 @@ def main(argv=None):
     if args.from_result:
         try:
             menus = diag.menus_from_result(args.from_result)
+            unverified = diag.unverified_from_result(args.from_result)
         except (ValueError, OSError) as exc:
             sys.exit(f"수집 결과 파일을 읽을 수 없습니다: {exc}")
+        menus = choose_menus(menus, unverified, args, not args.yes)
         title("수집 결과 → 진단 시트 입력")
         print(f"  수집 결과에서 메뉴 {len(menus)}개를 읽었습니다.")
         if not args.workbook:

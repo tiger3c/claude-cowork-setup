@@ -143,8 +143,8 @@ def make_workbook(report, selections=None):
         table(wb, "로그인후_전용메뉴", ["전체메뉴 No", "1 Depth", "2 Depth", "3 Depth", "URL", "수집 상태", "발견 화면"],
               [[positions[m["id"]], *(m["path"] + ["", "", ""])[:3], m["url"], m["status"], m["source_url"]] for m in only],
               [12, 24, 28, 32, 65, 20, 65])
-    table(wb, "방문기록", ["방문 주소", "최종 주소", "페이지 제목", "HTTP", "상태", "설명"],
-          [[p.get(k, "") for k in ["url", "final_url", "title", "http_status", "status", "reason"]] for p in report["pages"]], [70, 70, 45, 9, 24, 80])
+    table(wb, "방문기록", ["수집 단계", "방문 주소", "최종 주소", "페이지 제목", "HTTP", "상태", "설명"],
+          [[p.get(k, "") for k in ["phase", "url", "final_url", "title", "http_status", "status", "reason"]] for p in report["pages"]], [12, 70, 70, 45, 9, 24, 80])
     blocks = [selected[i:i + 250] for i in range(0, len(selected), 250)] or [[]]
     for index, block in enumerate(blocks, 1):
         ws = wb.create_sheet(f"진단메뉴_{index:02}")

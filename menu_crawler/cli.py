@@ -174,16 +174,9 @@ def wait(job, quiet=False):
     return data
 
 
-def settle(job, timeout=15):
-    """Wait for a queued command (goto/fill) to report back through the message."""
-    before = job.snapshot()["message"]
-    end = time.monotonic() + timeout
-    while time.monotonic() < end:
-        data = job.snapshot()
-        if data["message"] != before or data["state"] == "error":
-            return data
-        time.sleep(0.3)
-    return job.snapshot()
+def run_command(job, name, **args):
+    """Queue a quick command (goto/fill) and wait until the engine has finished it."""
+    return job.wait_done(job.command(name, **args))
 
 
 def crawl(job, phase):
@@ -200,8 +193,7 @@ def login_step(job, config, username=None):
     print("  1. 열린 브라우저 창에서 로그인하세요. 보안문자·OTP·추가 인증까지 마칩니다.")
     print("  2. 로그인된 화면이 보이면 여기서 Enter를 누르세요.")
     print("  ※ 아이디·비밀번호는 파일·엑셀·기록에 저장하지 않습니다.")
-    job.command("goto", url=config.login_url or config.url)
-    print("  " + settle(job)["message"])
+    print("  " + run_command(job, "goto", url=config.login_url or config.url)["message"])
     if username is not None:
         autofill(job, username)
     while True:
@@ -217,8 +209,7 @@ def login_step(job, config, username=None):
         if choice == "a":
             autofill(job, ask("  아이디"))
         elif choice == "o":
-            job.command("goto", url=config.login_url or config.url)
-            print("  " + settle(job)["message"])
+            print("  " + run_command(job, "goto", url=config.login_url or config.url)["message"])
         elif choice == "c":
             job.command("capture", phase="after")
             print("  " + wait(job, quiet=True)["message"])
@@ -231,9 +222,9 @@ def autofill(job, username):
     if not password:
         print("  비밀번호가 비어 있어 건너뜁니다.")
         return
-    job.command("fill", username=username, password=password)
+    ticket = job.command("fill", username=username, password=password)
     del password
-    print("  " + settle(job)["message"])
+    print("  " + job.wait_done(ticket)["message"])
 
 
 def summary(data):
@@ -379,6 +370,16 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
+def finish(data, args):
+    summary(data)
+    path = save(data, args.out)
+    print()
+    print(f"  엑셀 저장: {path}")
+    google_sheet_step(data, path, not args.yes)
+    if os.name == "nt" and not args.no_open and not args.yes and ask_yes("전체 메뉴 엑셀 파일을 열까요?", False):
+        os.startfile(path)  # noqa: S606 - Windows only, local result file
+
+
 def main(argv=None):
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -391,6 +392,7 @@ def main(argv=None):
     title(MODES[config.mode])
     print("  브라우저를 여는 중입니다...")
     job = Job(config)
+    data = None
     try:
         data = wait(job, quiet=True)
         print("  " + data["message"])
@@ -404,15 +406,15 @@ def main(argv=None):
                 data = crawl(job, "after")
             else:
                 data = job.snapshot()
-        summary(data)
-        path = save(data, args.out)
-        print()
-        print(f"  엑셀 저장: {path}")
-        google_sheet_step(data, path, not args.yes)
-        if os.name == "nt" and not args.no_open and not args.yes and ask_yes("전체 메뉴 엑셀 파일을 열까요?", False):
-            os.startfile(path)  # noqa: S606 - Windows only, local result file
+        finish(data, args)
     except KeyboardInterrupt:
-        print("\n  종료합니다.")
+        print("\n  중단했습니다.")
+        job.stop.set()
+        data = job.snapshot()
+        if data["menus"]:
+            print("  지금까지 수집한 결과를 저장합니다.")
+            args.yes = True  # no more questions after Ctrl+C
+            finish(data, args)
     finally:
         job.close()
         job.thread.join(timeout=10)

@@ -189,6 +189,8 @@ class Crawler:
         main_data = None
         for frame in list(page.frames):
             raw = frame.url
+            if frame != page.main_frame and not raw.lower().startswith(("http:", "https:")):
+                continue  # about:blank, srcdoc, chrome-error: no menu source of its own
             source = canonical_url(raw) or canonical_url(page.url)
             if not source or urlsplit(source).netloc.lower() not in self.hosts:
                 self.issue("프레임 범위 밖", raw, "이 프레임의 호스트가 수집 범위에 포함되지 않습니다.")
@@ -274,18 +276,41 @@ class Crawler:
                     if not fields.count():
                         continue
                     pw_field = fields.first
-                    user_field = pw_field.locator(
-                        'xpath=preceding::input[not(@type) or @type="text" or @type="email" or @type="tel" or @type="number"][1]')
-                    if username and user_field.count() and user_field.first.is_visible():
-                        user_field.first.fill(username)
+                    message = "아이디와 비밀번호를 입력했습니다."
+                    if username:
+                        user_field = self.username_field(pw_field)
+                        if user_field is None:
+                            message = "아이디 입력란을 찾지 못해 비밀번호만 입력했습니다. 아이디는 브라우저 창에서 직접 입력하세요."
+                        else:
+                            user_field.fill(username)
                     pw_field.fill(password)
                     page.bring_to_front()
                     self.report.login_check = ""
-                    self.emit(None, "아이디와 비밀번호를 입력했습니다. 보안문자·추가 인증이 있으면 완료하고, 로그인 버튼은 직접 누르세요.")
+                    self.emit(None, message + " 보안문자·추가 인증이 있으면 완료하고, 로그인 버튼은 직접 누르세요.")
                     return
                 except BrowserError:
                     continue
         self.emit(None, "비밀번호 입력란을 찾지 못했습니다. 브라우저 창에서 로그인 화면을 연 뒤 다시 시도하거나 직접 입력하세요.")
+
+    @staticmethod
+    def username_field(pw_field):
+        """Nearest visible text-like input before the password, inside the same form if there is one."""
+        kinds = 'not(@type) or @type="text" or @type="email" or @type="tel" or @type="number"'
+        for xpath in (f'xpath=ancestor::form[1]//input[{kinds}]', f'xpath=preceding::input[{kinds}]'):
+            candidates = pw_field.locator(xpath)
+            pw_box = pw_field.bounding_box() or {"y": 0}
+            found = None
+            for i in range(min(candidates.count(), 30)):
+                item = candidates.nth(i)
+                if not item.is_visible():
+                    continue
+                box = item.bounding_box()
+                # Keep the last visible field that sits before (above or left of) the password.
+                if box and box["y"] <= pw_box["y"] + 5:
+                    found = item
+            if found is not None:
+                return found
+        return None
 
     def login_screen_visible(self):
         for page in self.context.pages:
@@ -311,7 +336,7 @@ class Crawler:
         if self.phase == "after" and self.login_screen_visible():
             self.report.login_check = "열린 화면에 아직 비밀번호 입력란이 보입니다. 로그인이 끝났는지 확인하세요."
             self.issue("로그인 상태 확인", canonical_url(self.page.url), self.report.login_check)
-        self.report.pages = []
+        self.report.pages = [x for x in self.report.pages if x.get("phase") != label]
         self.report.visited_count = 0
         self.report.limit_reached = False
         self.report.finished_at = ""
@@ -347,7 +372,7 @@ class Crawler:
             url, hops = self.pending.popleft()
             self.report.current_url = url
             self.emit()
-            result = {"url": url, "final_url": "", "title": "", "http_status": None, "status": "수집됨", "reason": ""}
+            result = {"url": url, "final_url": "", "title": "", "http_status": None, "status": "수집됨", "reason": "", "phase": label}
             try:
                 if self.page.is_closed():
                     self.page = self.context.new_page()
@@ -392,10 +417,11 @@ class Crawler:
                 menu.status = "미방문"
                 menu.reason = end_reason or "탐색 이동 제한 등으로 방문하지 못했습니다."
         if self.phase == "after":
-            login_pages = sum(1 for p in self.report.pages if p["status"] in {"로그인 필요", "로그인·권한 확인"})
-            if self.report.pages and login_pages / len(self.report.pages) >= 0.3:
+            visited = [p for p in self.report.pages if p.get("phase") == label]
+            login_pages = sum(1 for p in visited if p["status"] in {"로그인 필요", "로그인·권한 확인"})
+            if visited and login_pages / len(visited) >= 0.3:
                 self.issue("로그인 세션 확인", self.config.url,
-                           f"로그인 후 수집인데 방문 페이지 {len(self.report.pages)}개 중 {login_pages}개가 로그인·권한 화면입니다. "
+                           f"로그인 후 수집인데 방문 페이지 {len(visited)}개 중 {login_pages}개가 로그인·권한 화면입니다. "
                            "로그인이 풀렸거나 세션이 만료됐을 수 있습니다. 다시 로그인한 뒤 재수집하세요.")
             for item in self.report.issues:
                 if item.get("phase") == PHASES["before"] and self.results.get(item.get("url"), {}).get("status") == "수집됨":
@@ -417,6 +443,8 @@ class Job:
         self.stop = threading.Event()
         self.commands = queue.Queue()
         self.lock = threading.Lock()
+        self.issued = 0  # commands queued so far; command() returns this as a ticket
+        self.completed = 0  # commands finished so far
         self.data = Report(config=config.model_dump()).to_dict()
         self.thread = threading.Thread(target=self.run, args=(config,), daemon=True)
         self.thread.start()
@@ -435,7 +463,16 @@ class Job:
                 raise ValueError("현재 작업을 마치거나 중지한 후 실행하세요.")
             if name in {"crawl", "capture"}:
                 self.data["state"] = "crawling" if name == "crawl" else "capturing"
-        self.commands.put((name, args))
+            self.issued += 1
+            ticket = self.issued
+            self.commands.put((name, args))
+        return ticket
+
+    def wait_done(self, ticket, timeout=30):
+        end = time.monotonic() + timeout
+        while self.completed < ticket and self.thread.is_alive() and time.monotonic() < end:
+            time.sleep(0.1)
+        return self.snapshot()
 
     def close(self):
         self.stop.set()
@@ -458,6 +495,7 @@ class Job:
                 elif command == "fill":
                     engine.fill_login(args.get("username", ""), args.get("password", ""))
                 args.clear()
+                self.completed += 1
         except Exception as exc:
             message = str(exc) if isinstance(exc, RuntimeError) else Crawler.error_text(exc)
             engine.issue("실행 오류", config.url, message)

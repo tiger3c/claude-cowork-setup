@@ -100,6 +100,7 @@ def test_api_routes_phases_by_mode_and_never_echoes_password():
 # ---------- end-to-end against a local test site ----------
 
 PAGE = """<!doctype html><html><head><title>{title}</title></head><body>
+<header><input name="q" type="text" placeholder="통합검색"><iframe src="about:blank"></iframe></header>
 <nav><ul>
   <li><span>고객센터</span><ul><li><a href="/notice">공지사항</a></li></ul></li>
   <li><a href="/mypage">마이페이지</a></li>
@@ -186,6 +187,8 @@ def test_compare_flow_against_local_login_site(site, monkeypatch):
         mypage = [x for x in report["issues"] if x["url"].endswith("/mypage")]
         assert mypage and all(x["phase"] == "로그인 전" and x["resolved"] == "로그인 후 수집됨" for x in mypage)
         assert report["phases_done"] == ["before", "after"]
+        assert {p["phase"] for p in report["pages"]} == {"로그인 전", "로그인 후"}
+        assert not any("about:blank" in x["url"] for x in report["issues"])
         assert not report["login_check"]
         assert "not-a-real-password" not in str(report)
         wb = load_workbook(BytesIO(make_workbook(report)))

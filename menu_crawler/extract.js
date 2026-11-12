@@ -5,7 +5,16 @@
   for (let i = 0; i < roots.length; i++) {
     for (const el of roots[i].querySelectorAll("*")) if (el.shadowRoot) roots.push(el.shadowRoot);
   }
+  // Standard menu markup first, then names older bank/government sites use (#menu, #topMenu, header lists, *gnb*, *nav*).
   const navSelector = customSelector || "nav,[role=navigation],[role=menubar],[role=menu],.gnb,#gnb,.lnb,#lnb,.snb,#snb,[class*=lnb],[class*=snb],.sitemap,#sitemap,[data-menu-root]";
+  const legacySelector = "[id*=gnb i],[class*=gnb i],#menu,.menu,[id$=menu i],[id*=mainmenu i],[id*=topmenu i],[class*=mainmenu i],[class*=main-menu i],[id*=navi i],[class*=navi i],header ul,#header ul,.header ul";
+  const menuArea = el => {
+    const nav = el.closest(navSelector);
+    if (nav || customSelector) return nav;
+    let top = null;
+    for (let c = el.closest(legacySelector); c; c = c.parentElement?.closest(legacySelector)) top = c;   // outermost legacy area
+    return top && top !== document.body ? top : null;
+  };
   const crumbSelector = '.breadcrumb,.breadcrumbs,[aria-label*="breadcrumb" i],.location-path,[data-breadcrumb]';
   const isHome = value => /^(home|홈|메인|첫 화면)$/i.test(value);
   // Side menus (LNB/SNB) usually show their parent as a heading instead of a nested list.
@@ -34,7 +43,8 @@
     root.querySelectorAll(navSelector);
     for (const el of root.querySelectorAll('a,button,[role="menuitem"],[role="treeitem"],[data-href],[data-url]')) {
       if (el.closest(crumbSelector)) continue;
-      const nav = el.closest(navSelector);
+      let nav = menuArea(el);
+      if (nav && !customSelector && nav.closest(commonSelector)) nav = null;   // footer / utility lists are not menus
       const raw = el.getAttribute("href") || el.getAttribute("data-href") || el.getAttribute("data-url") || "";
       if (!nav && !raw) continue;
       // In-page anchors (#content, #top, skip links) are not menus. SPA routes (#/x, #!/x) are.

@@ -426,7 +426,9 @@ def menus_from_result(path):
 
 # Menus whose names come from the site's navigation but whose page could not be confirmed
 # (login wall, permission, connection failure, crawl limit). They are real menus for the diagnosis list.
-UNVERIFIED = {"로그인 필요", "로그인·권한 확인", "접속 실패", "미방문"}
+UNVERIFIED = {"로그인 필요", "로그인·권한 확인", "접속 실패", "미방문", "동작 확인 필요"}
+SCRIPT_MENU = "동작 확인 필요"            # menu without an address (javascript:/onclick): name is known, page not opened
+ACTION_NAME = re.compile(r"(?:로그아웃|logout|log\s*out|sign\s*out|탈퇴|삭제|delete)", re.I)
 
 
 def menus_from_report(report, include_unverified=False):
@@ -436,9 +438,18 @@ def menus_from_report(report, include_unverified=False):
     unverified = []
     if include_unverified:
         for m in report["menus"]:
-            if (not m["ready"] and m["kind"] == "link" and m["evidence"] == "메뉴 DOM" and not m["hierarchy_review"]
+            script = m["status"] == SCRIPT_MENU
+            if script and (m["kind"] != "dynamic" or ACTION_NAME.search(" ".join(m["path"]))):
+                continue                      # logout / delete links are not menus to diagnose
+            if (not m["ready"] and m["kind"] in {"link", "dynamic"} and m["evidence"] == "메뉴 DOM" and not m["hierarchy_review"]
                     and 1 <= len(m["path"]) <= 3 and m["status"] in UNVERIFIED):
-                unverified.append(([clean(x) for x in (m["path"] + ["", "", ""])[:3]], m["status"]))
+                unverified.append(([clean(x) for x in (m["path"] + ["", "", ""])[:3]], "주소 없는 메뉴" if script else m["status"]))
+        # a parent that only opens its children is not a separate menu column
+        paths = [tuple(d) for d in confirmed] + [tuple(d) for d, _ in unverified]
+        def parent(d):
+            n = len([x for x in d if x])
+            return any(len([x for x in o if x]) > n and o[:n] == tuple(d)[:n] for o in paths)
+        unverified = [(d, s) for d, s in unverified if not (s == "주소 없는 메뉴" and parent(d))]
     return confirmed, unverified
 
 
@@ -452,8 +463,9 @@ def unverified_from_result(path):
         head = list(next(rows))
         col = {name: head.index(name) for name in ("1 Depth", "2 Depth", "3 Depth", "구분", "수집 상태", "구조 검토", "발견 근거")}
         for row in rows:
-            if (row[col["구분"]] == "페이지 메뉴" and row[col["발견 근거"]] == "메뉴 DOM" and row[col["구조 검토"]] != "필요"
-                    and row[col["수집 상태"]] in UNVERIFIED and row[col["1 Depth"]]):
+            if (row[col["구분"]] in {"페이지 메뉴", "동적 메뉴"} and row[col["발견 근거"]] == "메뉴 DOM" and row[col["구조 검토"]] != "필요"
+                    and row[col["수집 상태"]] in UNVERIFIED and row[col["1 Depth"]]
+                    and not ACTION_NAME.search(" ".join(str(row[col[k]] or "") for k in ("1 Depth", "2 Depth", "3 Depth")))):
                 out.append(([clean(row[col[k]]) for k in ("1 Depth", "2 Depth", "3 Depth")], row[col["수집 상태"]]))
     wb.close()
     return out

@@ -90,3 +90,59 @@ def test_last_work_file_is_offered_and_names_do_not_stack(tmp_path, monkeypatch)
     assert state.last_workbook() == str(book.resolve())
     out = ExcelBoard(book).out.name
     assert out.startswith("작업_메뉴입력_") and out.count("_메뉴입력_") == 1
+
+
+LEGACY = """<!doctype html><html lang="en"><head><title>Global Banking</title></head><body>
+<div id="wrap"><div id="topMenu"><ul>
+ <li><a href="javascript:goMenu('A01')">Inquiry</a><ul>
+   <li><a href="javascript:goMenu('A0101')">Account Inquiry</a><ul><li><a href="javascript:goMenu('A010101')">Balance</a></li>
+     <li><a href="javascript:goMenu('A010102')">Transaction History</a></li></ul></li></ul></li>
+ <li><a href="javascript:goMenu('B01')">Transfer</a><ul><li><a href="javascript:goMenu('B0101')">Domestic Transfer</a></li></ul></li>
+ <li><a href="javascript:fnLogout()">Logout</a></li>
+</ul></div>
+<div class="layer_popup" style="position:fixed;left:0;top:0;width:600px;height:500px;z-index:999;background:#fff">
+ Notice <a href="javascript:closePop()">Do not show today</a></div>
+</div><script>window.open('/event', 'ev');</script></body></html>"""
+
+
+def test_script_menus_on_a_legacy_english_site_are_filled(tmp_path, monkeypatch):
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Legacy(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = LEGACY.encode() if self.path in ("/", "/index.do") else b"<html><body>event</body></html>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Legacy)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        book = book_with_domains(tmp_path / "작업.xlsx")
+        wb = load_workbook(book)
+        wb["02_빈시트"]["D6"] = f"http://127.0.0.1:{server.server_address[1]}/"
+        wb.save(book)
+        asked = run(monkeypatch, tmp_path, [str(book), "02", "", "1", "n", "", "", ""])
+        assert any("주소 없는 메뉴" in a or "넣을까요" in a for a in asked)
+        out = next(tmp_path.glob("작업_메뉴입력_*[0-9].xlsx"))
+        ws = load_workbook(out)["02_빈시트"]
+        cols = [[ws.cell(r, c).value for r in (13, 14, 15)] for c in range(8, 14) if ws.cell(13, c).value]
+        assert ["Inquiry", "Account Inquiry", "Balance"] in cols
+        assert ["Transfer", "Domestic Transfer", None] in cols
+        assert not any("Logout" in str(x) for col in cols for x in col)
+        assert not any(c[0] == "Inquiry" and c[1] is None for c in cols)     # parent is not its own column
+        # the menu-list files already on disk can fill a fresh copy without crawling again (two files: 2nd = duplicates)
+        import shutil
+        first_result = next((tmp_path / "결과").glob("*_메뉴목록_*.xlsx"))
+        shutil.copy(first_result, first_result.with_name("사본_메뉴목록_2.xlsx"))
+        cli.main(["--from-result", str(tmp_path / "결과"), "--workbook", str(book), "--workbook-out", str(tmp_path / "re.xlsx"),
+                  "--include-unverified", "-y"])
+        ws2 = load_workbook(tmp_path / "re.xlsx")["02_빈시트"]
+        again = [[ws2.cell(r, c).value for r in (13, 14, 15)] for c in range(8, 14) if ws2.cell(13, c).value]
+        assert again == cols
+    finally:
+        server.shutdown()

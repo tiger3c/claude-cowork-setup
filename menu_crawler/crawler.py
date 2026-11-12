@@ -19,6 +19,23 @@ from .urls import AUTH, canonical_url, page_shape, public_url, visit_policy
 EXTRACT = Path(__file__).with_name("extract.js").read_text(encoding="utf-8")
 
 
+HIDE_POPUPS = """() => {
+  const vw = innerWidth, vh = innerHeight; let n = 0;
+  const hide = el => { el.setAttribute('data-menu-crawler-hidden', '1'); el.style.setProperty('display', 'none', 'important'); n++; };
+  const menuish = el => el.closest('nav,header,#header,[role=navigation],#gnb,.gnb,#lnb,.lnb') || el.querySelectorAll('a[href]').length > 15;
+  const sel = '[role=dialog],[aria-modal=true],[class*=popup i],[id*=popup i],[class*=layerpop i],[class*=layer_pop i],[class*=modal i],[id*=modal i]';
+  for (const el of document.querySelectorAll(sel)) {
+    const st = getComputedStyle(el), r = el.getBoundingClientRect();
+    if (st.display === 'none' || st.visibility === 'hidden' || !['fixed', 'absolute'].includes(st.position)) continue;
+    if (r.width * r.height < vw * vh * 0.04 || menuish(el)) continue;
+    hide(el);
+  }
+  for (const el of document.body ? [...document.body.children] : []) {     // full-screen dim layers
+    const st = getComputedStyle(el), r = el.getBoundingClientRect();
+    if (st.position === 'fixed' && r.width >= vw * 0.9 && r.height >= vh * 0.9 && !menuish(el) && el.querySelectorAll('a[href]').length < 5) hide(el);
+  }
+  return n;
+}"""
 SAME_PAGE_VISITS = 3     # visits of one page whose links differ only in a token / timestamp
 
 class Crawler:
@@ -35,6 +52,7 @@ class Crawler:
         self.pending: deque[tuple[str, int]] = deque()
         self.scheduled: set[str] = set()
         self.shapes: dict[str, int] = {}
+        self.closing_popups = False
         self.issue_keys: set[tuple] = set()
         self.phase = "after" if config.mode == "login" else "before"
         self.pw = self.browser = self.context = self.page = None
@@ -86,15 +104,21 @@ class Crawler:
         for channel in choices:
             try:
                 extra = {"channel": channel} if channel != "chromium" else {"executable_path": custom} if custom else {}
-                self.browser = self.pw.chromium.launch(headless=self.config.headless, **extra)
+                self.browser = self.pw.chromium.launch(
+                    headless=self.config.headless,
+                    # no "translate this page?" bar, Korean UI, and the normal popup blocker back on
+                    # (pages may not open windows by themselves; a click the user makes still can).
+                    args=["--disable-features=Translate,TranslateUI", "--lang=ko-KR", "--no-first-run", "--no-default-browser-check"],
+                    ignore_default_args=["--disable-popup-blocking"], **extra)
                 break
             except BrowserError:
                 continue
         if not self.browser:
             raise RuntimeError("브라우저를 열지 못했습니다. Edge/Chrome을 설치하거나 install_browser.bat를 실행하세요. 회사 브라우저 정책도 확인하세요.")
         # Test/dev servers of a diagnosis target often use self-signed certificates.
-        self.context = self.browser.new_context(accept_downloads=False, ignore_https_errors=True, viewport={"width": 1440, "height": 1000})
-        self.context.on("page", lambda p: p.on("dialog", lambda dialog: dialog.dismiss()))
+        self.context = self.browser.new_context(accept_downloads=False, ignore_https_errors=True, locale="ko-KR",
+                                                viewport={"width": 1440, "height": 1000})
+        self.context.on("page", self.on_page)
         self.page = self.context.new_page()
         self.page.set_default_timeout(self.config.timeout_ms)
         first = self.config.login_url if self.config.mode == "login" and self.config.login_url else self.config.url
@@ -107,6 +131,22 @@ class Crawler:
             "login": "열린 브라우저 창에서 로그인을 마친 뒤 로그인 후 수집을 시작하세요.",
             "compare": "1단계: 로그인하지 않은 상태로 공개 메뉴를 먼저 수집합니다.",
         }[self.config.mode])
+
+    def on_page(self, page):
+        page.on("dialog", lambda dialog: dialog.dismiss())
+        # While crawling, windows the site opens by itself (notices, events) are closed. During the login step
+        # they stay open: certificate / 2FA windows are part of logging in.
+        if self.closing_popups and page is not self.page:
+            try:
+                page.close()
+            except BrowserError:
+                pass
+
+    def hide_layer_popups(self, page):
+        try:
+            return page.evaluate(HIDE_POPUPS)
+        except BrowserError:
+            return 0
 
     @staticmethod
     def error_text(exc):
@@ -236,6 +276,8 @@ class Crawler:
 
     def hover_menus(self, page, hops):
         """Hover only; never submit forms or click arbitrary application actions."""
+        if self.hide_layer_popups(page):          # notice / event layers would catch the mouse
+            page.wait_for_timeout(100)
         selectors = self.config.menu_selector or "nav,[role=navigation],.gnb,#gnb,.lnb,#lnb"
         try:
             navs = page.locator(selectors)
@@ -343,6 +385,13 @@ class Crawler:
         return False
 
     def crawl(self, phase=None):
+        self.closing_popups = True
+        try:
+            return self._crawl(phase)
+        finally:
+            self.closing_popups = False
+
+    def _crawl(self, phase=None):
         if phase:
             self.phase = phase
         self.stop.clear()

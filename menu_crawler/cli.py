@@ -646,6 +646,8 @@ def choose_menus(confirmed, unverified, args, interactive):
         kinds = " · ".join(f"{k} {n}" for k, n in Counter(s for _, s in unverified).most_common())
         print()
         print(f"  메뉴 구조에서 이름은 확인했지만 페이지를 확인하지 못한 메뉴 {len(unverified)}개 ({kinds})")
+        if any(k == "주소 없는 메뉴" for _, k in unverified):
+            print("  " + ui.dim("주소 없는 메뉴 = 클릭하면 스크립트로 화면을 바꾸는 메뉴(javascript:). 진단 시트에는 메뉴 이름만 들어갑니다."))
         args.include_unverified = ask_yes("  이 메뉴도 진단 시트에 넣을까요? (이후 대상에도 같은 답을 적용)", True)
     return confirmed + [d for d, _ in unverified] if args.include_unverified else confirmed
 
@@ -735,6 +737,7 @@ def campaign(args):
         settings["max_pages"] = ask_int("    최대 방문 페이지 수 (0 = 제한 없음)", settings["max_pages"], 0, 100000)
         settings["max_seconds"] = ask_int("    대상별 최대 수집 시간(초) (0 = 제한 없음)", settings["max_seconds"], 0, 172800)
         settings["delay_ms"] = ask_int("    페이지 간 간격(ms)", settings["delay_ms"], 0, 5000)
+        args.selector = ask("    메뉴 영역 CSS 선택자 (자동으로 못 찾을 때만, 예: #topMenu, 없으면 Enter)", args.selector)
 
     ui.header("작업 순서 확인", board.label)
     print("  접속 확인 중...")
@@ -786,6 +789,13 @@ def campaign(args):
             idx += 1
     done += [(Filled(t, "실행 안 함"), 0, "", url) for t, url, _ in plan[idx:]]
 
+    report(done, board, mode, args, stop)
+    if isinstance(stop, SystemExit):
+        raise stop
+
+
+def report(done, board, mode, args, stop=None):
+    """Result table, work log, where the filled workbook is."""
     ui.header("작업 결과", board.label)
     ui.table([("진단 시트", 26), ("수집", 5), ("기입", 17), ("중복", 5), ("위치", 13), ("점검 주소", 0)],
              [[f.target.sheet or "진단 시트", str(n) if n else "-", f.status + (f" {f.written}개" if f.written else ""),
@@ -798,18 +808,74 @@ def campaign(args):
         print("  " + ui.dim(f"작업 기록: {log}"))
     print()
     if isinstance(board, ExcelBoard) and board.current == board.src:
-        ui.ok("새로 기입한 메뉴가 없어 새 진단 엑셀을 만들지 않았습니다. 작업 엑셀은 그대로입니다.")
+        ui.note("새로 기입한 메뉴가 없어 새 진단 엑셀을 만들지 않았습니다. 작업 엑셀은 그대로입니다.")
     if isinstance(board, ExcelBoard):
         state.remember_workbook(board.current)       # next run: Enter continues from the latest copy
     if isinstance(board, ExcelBoard) and board.current != board.src:
         ui.ok("진단 엑셀 (원본은 그대로):")
         print("  " + str(board.out.resolve()))
-        if os.name == "nt" and not args.no_open and stop is None and ask_yes("  진단 엑셀을 열까요?", True):
+        if os.name == "nt" and not args.no_open and not args.yes and stop is None and ask_yes("  진단 엑셀을 열까요?", True):
             os.startfile(board.out)  # noqa: S606 - Windows only, local file the user just created
     if any(f.status == "붙여넣기 준비" for f, _, _, _ in done):
         print("  " + ui.dim("붙여넣기 파일과 입력 내역(.tsv)은 결과 폴더에 있습니다."))
-    if isinstance(stop, SystemExit):
-        raise stop
+
+
+def result_files(spec):
+    """--from-result: a file, a folder (every *_메뉴목록_*.xlsx in it) or a wildcard pattern."""
+    import glob
+    path = Path(spec)
+    if path.is_dir():
+        found = sorted(path.glob("*_메뉴목록_*.xlsx"))
+    elif any(ch in spec for ch in "*?["):
+        found = sorted(Path(p) for p in glob.glob(spec))
+    else:
+        found = [path] if path.is_file() else []
+    return [p for p in found if p.suffix.lower() == ".xlsx" and not p.name.startswith("~$")]
+
+
+def fill_results(files, args):
+    """Several crawl result files -> their 진단 시트 (mapped by each file's start address and D6), one output copy."""
+    interactive = not args.yes
+    ui.header("메뉴 목록 엑셀 -> 진단 시트 기입", f"결과 파일 {len(files)}개")
+    board = choose_board(args, interactive)
+    if board is None:
+        return
+    items = load_targets(board)
+    done = []
+    try:
+        for f in files:
+            url = diag.result_url(f)
+            print()
+            print("  " + ui.bold(f"> {f.name}") + ui.dim(f"  {url}"))
+            try:
+                menus = diag.menus_from_result(f)
+                unverified = diag.unverified_from_result(f)
+            except (ValueError, OSError) as exc:
+                ui.fail(f"읽을 수 없는 파일이라 건너뜁니다: {exc}")
+                continue
+            hit, pool = map_url(url, items, interactive) if url else (None, items)
+            if hit is None:
+                if not interactive:
+                    done.append((Filled(diag.Target(""), "시트 못 찾음"), len(menus), f.name, url))
+                    continue
+                hit = pick_one(pool, items, "  진단 대상 (이름 일부 · ?=목록 · Enter=이 파일 건너뛰기)")
+                if hit is None:
+                    done.append((Filled(diag.Target(""), "건너뜀"), len(menus), f.name, url))
+                    continue
+            menus = choose_menus(menus, unverified, args, interactive)
+            if not menus:
+                ui.fail("넣을 메뉴가 없습니다.")
+                done.append((Filled(hit, "기입할 메뉴 없음"), 0, f.name, url))
+                continue
+            try:
+                done.append((board.fill(hit, menus, interactive, f.parent), len(menus), f.name, url))
+            except Exception as exc:  # noqa: BLE001 - one broken file must not stop the others
+                ui.fail(f"기입하지 못했습니다: {type(exc).__name__}: {exc}")
+                done.append((Filled(hit, "실패"), len(menus), f.name, url))
+    except KeyboardInterrupt:
+        print()
+        ui.note("중단했습니다. 지금까지 한 작업을 정리합니다.")
+    report(done, board, "", args)
 
 
 def write_log(done, board, mode):
@@ -997,6 +1063,11 @@ def run_target(i, total, t, url, login_url, mode, settings, board, args):
         return Filled(t, "수집 실패"), 0, path.name, url
     confirmed, unverified = diag.menus_from_report(data, include_unverified=True)
     menus = choose_menus(confirmed, unverified, args, True)
+    if not menus:
+        counts = ", ".join(f"{k} {n}" for k, n in Counter(m["status"] for m in data["menus"]).most_common(4))
+        ui.fail(f"진단 시트에 넣을 메뉴가 없어 기입하지 않았습니다. (발견 {len(data['menus'])}개: {counts})")
+        ui.say(ui.dim("메뉴가 표준 형태가 아니면 고급 설정의 '메뉴 영역 CSS 선택자'나 로그인 단계의 c(현재 화면 추가)를 사용하세요."))
+        return Filled(t, "기입할 메뉴 없음"), 0, path.name, url
     if error is not None and not ask_yes(f"  수집을 중간에 멈췄습니다. 멈춘 시점까지의 메뉴 {len(menus)}개를 진단 시트에 기입할까요?", True):
         return Filled(t, "기입 안 함"), len(menus), path.name, url
     print()
@@ -1016,16 +1087,21 @@ def main(argv=None):
         connect_google(True, force=True)
         return
     if args.from_result:
-        title("수집 결과 → 진단 시트 입력")
-        try:
-            menus = diag.menus_from_result(args.from_result)
-            unverified = diag.unverified_from_result(args.from_result)
-        except (ValueError, OSError) as exc:
-            sys.exit(f"수집 결과 파일을 읽을 수 없습니다: {exc}")
-        print(f"  수집 결과에서 진단 메뉴 {len(menus)}개를 읽었습니다.")
-        menus = choose_menus(menus, unverified, args, not args.yes)
-        fill_step(menus, args, not args.yes, Path(args.from_result).parent, diag.result_url(args.from_result))
-        return
+        files = result_files(args.from_result)
+        if not files:
+            sys.exit(f"수집 결과 파일을 찾을 수 없습니다: {args.from_result}")
+        if len(files) == 1:
+            title("수집 결과 -> 진단 시트 입력")
+            try:
+                menus = diag.menus_from_result(files[0])
+                unverified = diag.unverified_from_result(files[0])
+            except (ValueError, OSError) as exc:
+                sys.exit(f"수집 결과 파일을 읽을 수 없습니다: {exc}")
+            print(f"  수집 결과에서 진단 메뉴 {len(menus)}개를 읽었습니다.")
+            menus = choose_menus(menus, unverified, args, not args.yes)
+            fill_step(menus, args, not args.yes, files[0].parent, diag.result_url(files[0]))
+            return
+        return fill_results(files, args)
     try:
         if not args.url and not args.yes:
             return campaign(args)

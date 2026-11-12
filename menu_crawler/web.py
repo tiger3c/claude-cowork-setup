@@ -5,6 +5,8 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from typing import Literal
+
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -18,6 +20,16 @@ STATIC = Path(__file__).with_name("static")
 class Selection(BaseModel):
     id: str = Field(max_length=64)
     depths: list[str] = Field(min_length=3, max_length=3)
+
+
+class Control(BaseModel):
+    phase: Literal["before", "after"] | None = None
+
+
+class LoginFill(BaseModel):
+    # No length constraints here: a validation error would echo the value back.
+    username: str = ""
+    password: str = ""
 
 
 class ExportRequest(BaseModel):
@@ -71,14 +83,27 @@ def create_app(token=None):
         app.state.job = Job(config)
         return {"ok": True}
 
+    def allowed_phase(job, phase):
+        mode = job.config.mode
+        phase = phase or ("after" if mode == "login" else "before")
+        if mode == "public" and phase == "after":
+            raise HTTPException(409, "로그인 전 수집 방식입니다. 로그인 후 수집은 수집 방식을 바꿔 새로 시작하세요.")
+        if mode == "login" and phase == "before":
+            raise HTTPException(409, "로그인 후 수집 방식입니다.")
+        return phase
+
     @app.post("/api/control/{action}")
-    def action(action: str):
+    def action(action: str, payload: Control | None = None):
         job = app.state.job
         if not job:
             raise HTTPException(409, "브라우저를 먼저 열어 주세요.")
         try:
             if action in {"crawl", "capture"}:
-                job.command(action)
+                job.command(action, phase=allowed_phase(job, payload.phase if payload else None))
+            elif action == "login":
+                if job.config.mode == "public":
+                    raise HTTPException(409, "로그인 전 수집 방식에서는 로그인 화면을 쓰지 않습니다.")
+                job.command("goto", url=job.config.login_url or job.config.url)
             elif action == "stop":
                 job.stop.set()
             elif action == "close":
@@ -86,6 +111,19 @@ def create_app(token=None):
                 app.state.job = None
             else:
                 raise HTTPException(404, "없는 기능입니다.")
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"ok": True}
+
+    @app.post("/api/login/fill")
+    def fill(payload: LoginFill):
+        job = app.state.job
+        if not job or job.config.mode == "public":
+            raise HTTPException(409, "로그인 단계에서만 사용할 수 있습니다.")
+        if not payload.password or len(payload.password) > 500 or len(payload.username) > 300:
+            raise HTTPException(422, "비밀번호를 입력하세요. 아이디는 300자, 비밀번호는 500자 이내입니다.")
+        try:
+            job.command("fill", username=payload.username, password=payload.password)
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
         return {"ok": True}

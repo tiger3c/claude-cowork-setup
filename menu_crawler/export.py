@@ -5,6 +5,8 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from .models import MODES, PHASES
+
 NAVY = "1F3864"
 BLUE = "D9E1F2"
 YELLOW = "FFF2CC"
@@ -76,8 +78,13 @@ def make_workbook(report, selections=None):
     wb.remove(wb.active)
     counts = Counter(m["status"] for m in report["menus"])
     needs = [m for m in report["menus"] if (not m["ready"] and m["kind"] != "group") or m["hierarchy_review"]]
+    mode = report["config"].get("mode", "public")
+    compare = mode == "compare"
+    visibility = Counter(m.get("visibility") or "" for m in report["menus"])
     summary = [
         ["대상", report["config"]["site_name"]], ["시작 주소", report["config"]["url"]],
+        ["수집 방식", MODES.get(mode, mode)],
+        ["완료한 단계", ", ".join(PHASES.get(x, x) for x in report.get("phases_done", [])) or "없음"],
         ["수집 상태", {"complete": "설정 범위 탐색 종료", "stopped": "사용자 중지", "ready": "화면 추가·접속 확인 전", "error": "실행 오류"}.get(report["state"], report["state"])],
         ["시작 시각 (UTC)", report["started_at"]], ["종료 시각 (UTC)", report["finished_at"]],
         ["방문 주소 수", report["visited_count"]], ["발견한 메뉴·분류 수", len(report["menus"])],
@@ -90,10 +97,15 @@ def make_workbook(report, selections=None):
         ["수동 검토", "일반 본문 링크는 메뉴 단계 확인 대상으로 분류합니다. 1 Depth만 있는 메뉴도 정상입니다. 수집 상태는 취약점 진단 결과가 아닙니다."],
         ["민감 주소 값", "일반적인 토큰·인증 코드·세션 쿼리 값은 URL에서 [가림]으로 표시합니다."],
     ] + [["상태별 · " + status, count] for status, count in sorted(counts.items())]
+    if compare:
+        summary += [["노출 · 로그인 전 공개", visibility["로그인 전 공개"]], ["노출 · 로그인 후 전용", visibility["로그인 후 전용"]],
+                    ["노출 구분 해석", "‘로그인 후 전용’은 로그인 전 화면에서는 보이지 않고 로그인 후 화면에서만 발견된 메뉴입니다. "
+                     "인증·접근통제 점검 대상을 고를 때 참고하세요. 메뉴가 보이지 않는 것이 해당 페이지의 접근 차단을 뜻하지는 않습니다."]]
     ws = table(wb, "수집요약", ["항목", "내용"], summary, [30, 110])
     ws.freeze_panes = "A2"
-    for r in range(15, 19):
-        ws.row_dimensions[r].height = 62
+    for r in range(2, len(summary) + 2):
+        if len(str(ws.cell(r, 2).value or "")) > 90:
+            ws.row_dimensions[r].height = 62
     inventory = []
     positions = {}
     for i, m in enumerate(report["menus"], 1):
@@ -102,22 +114,35 @@ def make_workbook(report, selections=None):
         inventory.append([i, *depths, " > ".join(m["path"][:3]), m["url"],
                           {"group": "분류 메뉴", "dynamic": "동적 메뉴", "link": "페이지 메뉴"}.get(m["kind"], m["kind"]),
                           m["status"], "필요" if m["hierarchy_review"] else "메뉴 구조 확인", m["evidence"],
-                          m["title"], m["http_status"], m["source_url"], m["reason"]])
-    ws = table(wb, "전체메뉴", ["No", "1 Depth", "2 Depth", "3 Depth", "메뉴 경로", "URL", "구분", "수집 상태", "구조 검토", "발견 근거", "페이지 제목", "HTTP", "발견 화면", "설명"], inventory,
-               [7, 24, 28, 32, 58, 65, 16, 20, 20, 22, 40, 9, 65, 65])
+                          m["title"], m["http_status"], m["source_url"], m["reason"]]
+                         + ([m.get("visibility", ""), m.get("status_before", "")] if compare else []))
+    headers = ["No", "1 Depth", "2 Depth", "3 Depth", "메뉴 경로", "URL", "구분", "수집 상태", "구조 검토", "발견 근거", "페이지 제목", "HTTP", "발견 화면", "설명"]
+    widths = [7, 24, 28, 32, 58, 65, 16, 20, 20, 22, 40, 9, 65, 65]
+    if compare:
+        headers += ["노출 구분", "로그인 전 상태"]
+        widths += [18, 20]
+    ws = table(wb, "전체메뉴", headers, inventory, widths)
     for r, m in enumerate(report["menus"], 2):
         color = GREEN if m["ready"] else GRAY if m["kind"] == "group" and not m["hierarchy_review"] else ORANGE
         for c in (8, 9):
             ws.cell(r, c).fill = PatternFill("solid", fgColor=color)
+        if compare and m.get("visibility") == "로그인 후 전용":
+            ws.cell(r, 15).fill = PatternFill("solid", fgColor=BLUE)
         ws.row_dimensions[r].height = 44
     issues = [["메뉴", *m["path"][:3], *([""] * (3 - len(m["path"][:3]))), m["url"],
                "구조 확인 필요" if m["status"] == "수집됨" and m["hierarchy_review"] else m["status"],
-               m["reason"] or "화면에서 실제 메뉴 단계를 확인하고 선택하세요.", m["source_url"]] for m in needs]
-    issues += [["페이지", "", "", "", x.get("url", ""), x["kind"], x["reason"], ""] for x in report["issues"]]
-    ws = table(wb, "미수집_확인필요", ["구분", "1 Depth", "2 Depth", "3 Depth", "관련 주소", "상태", "확인할 내용", "발견 화면"], issues,
-               [12, 24, 28, 32, 65, 24, 85, 65])
+               m["reason"] or "화면에서 실제 메뉴 단계를 확인하고 선택하세요.", m["source_url"], "", ""] for m in needs]
+    issues += [["페이지", "", "", "", x.get("url", ""), x["kind"], x["reason"], "", x.get("phase", ""), x.get("resolved", "")]
+               for x in report["issues"]]
+    ws = table(wb, "미수집_확인필요", ["구분", "1 Depth", "2 Depth", "3 Depth", "관련 주소", "상태", "확인할 내용", "발견 화면", "수집 단계", "해결 여부"], issues,
+               [12, 24, 28, 32, 65, 24, 85, 65, 14, 18])
     for row in ws.iter_rows(min_row=2):
-        row[5].fill = PatternFill("solid", fgColor=ORANGE)
+        row[5].fill = PatternFill("solid", fgColor=GREEN if row[9].value else ORANGE)
+    if compare:
+        only = [m for m in report["menus"] if m.get("visibility") == "로그인 후 전용"]
+        table(wb, "로그인후_전용메뉴", ["전체메뉴 No", "1 Depth", "2 Depth", "3 Depth", "URL", "수집 상태", "발견 화면"],
+              [[positions[m["id"]], *(m["path"] + ["", "", ""])[:3], m["url"], m["status"], m["source_url"]] for m in only],
+              [12, 24, 28, 32, 65, 20, 65])
     table(wb, "방문기록", ["방문 주소", "최종 주소", "페이지 제목", "HTTP", "상태", "설명"],
           [[p.get(k, "") for k in ["url", "final_url", "title", "http_status", "status", "reason"]] for p in report["pages"]], [70, 70, 45, 9, 24, 80])
     blocks = [selected[i:i + 250] for i in range(0, len(selected), 250)] or [[]]

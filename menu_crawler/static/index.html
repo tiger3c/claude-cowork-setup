@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>웹 메뉴 수집기</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <div class="brand">웹 메뉴 수집기 <span class="ver">v0.2</span></div>
+  <ol class="steps" id="steps">
+    <li data-step="1">수집 방식</li>
+    <li data-step="2">정보 입력</li>
+    <li data-step="3">수집 진행</li>
+    <li data-step="4">결과 · 엑셀</li>
+  </ol>
+</header>
+
+<main>
+  <div class="alert error" id="error" hidden></div>
+
+  <!-- 1. 수집 방식 -->
+  <section class="panel" data-panel="1">
+    <h1>어떤 메뉴를 수집할까요?</h1>
+    <p class="lead">방식에 따라 다음 단계에서 필요한 정보만 받습니다. 메뉴는 최대 3 Depth까지 정리합니다.</p>
+    <div class="modes">
+      <label class="mode">
+        <input type="radio" name="mode" value="public" checked>
+        <span class="mode-title">로그인 전 메뉴 수집</span>
+        <span class="mode-desc">로그인하지 않은 방문자에게 보이는 공개 메뉴만 수집합니다.</span>
+        <span class="mode-when">추천: 공개 홈페이지, 처음 사이트 구조를 빠르게 파악할 때</span>
+        <span class="mode-need">필요한 정보: 사이트 주소</span>
+      </label>
+      <label class="mode">
+        <input type="radio" name="mode" value="login">
+        <span class="mode-title">로그인 후 메뉴 수집</span>
+        <span class="mode-desc">브라우저 창에서 로그인한 뒤, 로그인 상태에서 보이는 메뉴를 수집합니다.</span>
+        <span class="mode-when">추천: 업무 시스템, 회원 전용 서비스, 관리자 화면</span>
+        <span class="mode-need">필요한 정보: 사이트 주소, 로그인 페이지 주소(선택), 진단용 계정</span>
+      </label>
+      <label class="mode">
+        <input type="radio" name="mode" value="compare">
+        <span class="mode-title">로그인 전·후 비교 수집</span>
+        <span class="mode-desc">공개 메뉴를 먼저 수집하고, 로그인 후 다시 수집해 <b>로그인 후에만 보이는 메뉴</b>를 구분합니다.</span>
+        <span class="mode-when">추천: 인증·접근통제 점검 대상 선정, 전체 메뉴 맵 작성</span>
+        <span class="mode-need">필요한 정보: 사이트 주소, 로그인 페이지 주소(선택), 진단용 계정</span>
+      </label>
+    </div>
+    <div class="actions"><button class="primary" id="toForm">다음</button></div>
+  </section>
+
+  <!-- 2. 정보 입력 -->
+  <section class="panel" data-panel="2" hidden>
+    <h1 id="formTitle">수집 정보 입력</h1>
+    <form id="form" novalidate>
+      <div class="grid">
+        <label>대상 이름
+          <input name="site_name" maxlength="120" placeholder="예: OO은행 인터넷뱅킹">
+          <small>엑셀 요약과 파일 이름에 사용합니다.</small>
+        </label>
+        <label>사이트 주소 <em>필수</em>
+          <input name="url" required placeholder="https://www.example.com">
+          <small>수집을 시작할 첫 화면 주소입니다. 이 주소의 호스트만 방문합니다.</small>
+        </label>
+        <label data-modes="login compare">로그인 페이지 주소
+          <input name="login_url" placeholder="https://www.example.com/login">
+          <small>비워 두면 사이트 주소에서 직접 로그인 화면으로 이동해 로그인합니다.</small>
+        </label>
+        <label>사용할 브라우저
+          <select name="browser">
+            <option value="auto">자동 (Edge → Chrome → 내장 Chromium)</option>
+            <option value="msedge">Microsoft Edge</option>
+            <option value="chrome">Google Chrome</option>
+            <option value="chromium">내장 Chromium</option>
+          </select>
+        </label>
+      </div>
+      <label class="check" data-modes="public">
+        <input type="checkbox" name="headless"> 브라우저 창을 띄우지 않고 실행 (화면 확인 없이 빠르게 수집)
+      </label>
+      <div class="note" data-modes="login compare">
+        <b>로그인 방법</b> — 수집용 브라우저 창이 열리면 그 창에서 직접 로그인합니다. 보안문자·OTP·간편인증도 그대로 진행할 수 있습니다.
+        원하면 다음 단계에서 아이디·비밀번호를 자동 입력할 수 있으며, 로그인 버튼은 직접 누릅니다. 계정 정보는 파일·엑셀·기록에 저장하지 않습니다.
+      </div>
+      <details>
+        <summary>고급 설정</summary>
+        <div class="grid">
+          <label>추가 허용 호스트
+            <textarea name="extra_hosts" rows="2" placeholder="m.example.com&#10;auth.example.com"></textarea>
+            <small>한 줄에 하나씩. 로그인·메뉴가 다른 호스트에 있을 때만 추가합니다.</small>
+          </label>
+          <label>메뉴 영역 선택자 (CSS)
+            <input name="menu_selector" maxlength="500" placeholder="#gnb, .lnb">
+            <small>메뉴를 잘 못 찾을 때만 입력합니다.</small>
+          </label>
+          <label>최대 방문 페이지 수 <input name="max_pages" type="number" min="1" max="2000" value="300"></label>
+          <label>최대 수집 시간(초) <input name="max_seconds" type="number" min="10" max="7200" value="1200"></label>
+          <label>최대 링크 이동 횟수 <input name="max_hops" type="number" min="1" max="20" value="6"></label>
+          <label>페이지 로딩 후 대기(ms) <input name="wait_ms" type="number" min="0" max="5000" value="700"></label>
+          <label>페이지 간 간격(ms) <input name="delay_ms" type="number" min="0" max="5000" value="300">
+            <small>대상 서버 부담을 줄이려면 늘리세요.</small></label>
+          <label>응답 대기 한도(ms) <input name="timeout_ms" type="number" min="1000" max="60000" value="15000"></label>
+        </div>
+      </details>
+      <label class="check consent">
+        <input type="checkbox" name="consent" required> 수집 대상 사이트에 대한 점검 권한(계약·승인)을 확인했습니다.
+      </label>
+      <div class="actions">
+        <button type="button" class="ghost" id="backToMode">이전</button>
+        <button type="submit" class="primary" id="openBtn">브라우저 열고 시작</button>
+      </div>
+    </form>
+  </section>
+
+  <!-- 3. 수집 진행 -->
+  <section class="panel" data-panel="3" hidden>
+    <div class="status-head">
+      <h1 id="runTitle">수집 진행</h1>
+      <span class="badge" id="stateBadge">대기</span>
+    </div>
+    <ol class="timeline" id="timeline"></ol>
+    <p class="message" id="message"></p>
+    <div class="alert warn" id="loginCheck" hidden></div>
+    <div class="stats">
+      <div><span id="statMenus">0</span>발견 메뉴</div>
+      <div><span id="statReady">0</span>붙여넣기 대상</div>
+      <div><span id="statPages">0</span>방문 페이지</div>
+      <div><span id="statIssues">0</span>확인 필요</div>
+    </div>
+    <p class="current" id="current"></p>
+
+    <div class="login-box" id="loginBox" hidden>
+      <h2>로그인 단계</h2>
+      <ol class="howto">
+        <li>‘로그인 화면 열기’를 누르거나 열린 브라우저 창에서 로그인 화면으로 이동합니다.</li>
+        <li>브라우저 창에서 로그인합니다. 보안문자·추가 인증까지 마칩니다.</li>
+        <li>로그인된 화면이 보이면 아래 <b>로그인 완료 · 수집 시작</b>을 누릅니다.</li>
+      </ol>
+      <div class="actions left">
+        <button class="ghost" id="loginOpen">로그인 화면 열기</button>
+      </div>
+      <details class="fill">
+        <summary>아이디·비밀번호 자동 입력 (선택)</summary>
+        <form id="fillForm" autocomplete="off">
+          <div class="grid">
+            <label>아이디 <input name="username" autocomplete="off" maxlength="300"></label>
+            <label>비밀번호 <input name="password" type="password" autocomplete="new-password" maxlength="500"></label>
+          </div>
+          <small>로그인 화면의 입력란에 채우기만 합니다. 로그인 버튼은 브라우저 창에서 직접 누르세요. 입력값은 보내는 즉시 이 화면에서 지우며 저장하지 않습니다.</small>
+          <div class="actions left"><button type="submit" class="ghost">입력란에 채우기</button></div>
+        </form>
+      </details>
+      <div class="actions">
+        <button class="primary" id="loginDone">로그인 완료 · 수집 시작</button>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="ghost" id="captureBtn" title="브라우저에서 직접 펼친 메뉴나 열어 둔 화면의 메뉴를 추가합니다.">현재 화면 메뉴 추가</button>
+      <button class="ghost" id="recrawlBtn" hidden>다시 수집</button>
+      <button class="danger" id="stopBtn" hidden>중지</button>
+      <button class="primary" id="toResult" hidden>결과 확인</button>
+    </div>
+    <p class="hint">수집 중 브라우저 창을 닫지 마세요. 메뉴가 마우스를 올려야 열리는 사이트라면 브라우저에서 메뉴를 펼친 뒤 ‘현재 화면 메뉴 추가’를 누르세요.</p>
+  </section>
+
+  <!-- 4. 결과 -->
+  <section class="panel wide" data-panel="4" hidden>
+    <div class="status-head">
+      <h1>결과 확인 · 엑셀 내려받기</h1>
+      <div class="actions inline">
+        <button class="ghost" id="backToRun">수집 화면으로</button>
+        <button class="primary" id="exportBtn">엑셀 내려받기</button>
+      </div>
+    </div>
+    <p class="lead">체크한 메뉴가 진단 시트 붙여넣기(진단메뉴_01…)에 들어갑니다. 메뉴명은 여기서 고칠 수 있으며, 전체메뉴 시트에는 수집 원본이 남습니다.</p>
+    <div class="filters">
+      <input id="fText" placeholder="메뉴명·URL 검색">
+      <select id="fStatus"><option value="">모든 상태</option></select>
+      <select id="fVis" hidden>
+        <option value="">모든 노출 구분</option>
+        <option>로그인 전 공개</option>
+        <option>로그인 후 전용</option>
+      </select>
+      <label class="check"><input type="checkbox" id="fChecked"> 체크한 메뉴만</label>
+      <span class="count" id="selCount"></span>
+      <button class="ghost small" id="checkAll">보이는 항목 전체 체크</button>
+      <button class="ghost small" id="uncheckAll">보이는 항목 체크 해제</button>
+    </div>
+    <div class="table-wrap">
+      <table class="menus">
+        <thead><tr><th></th><th>No</th><th>1 Depth</th><th>2 Depth</th><th>3 Depth</th><th>상태</th><th class="vis-col">노출</th><th>근거</th><th>URL</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <h2>미수집 · 확인 필요 (페이지 단위)</h2>
+    <div class="table-wrap short">
+      <table>
+        <thead><tr><th>단계</th><th>구분</th><th>주소</th><th>내용</th><th>해결</th></tr></thead>
+        <tbody id="issues"></tbody>
+      </table>
+    </div>
+    <div class="actions">
+      <button class="danger ghost" id="restart">새 수집 시작 (브라우저 닫기)</button>
+    </div>
+  </section>
+</main>
+</body>
+</html>

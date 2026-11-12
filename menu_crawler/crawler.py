@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+import os
 import queue
 import threading
 import time
@@ -12,7 +13,7 @@ from urllib.parse import urlsplit
 from playwright.sync_api import Error as BrowserError
 from playwright.sync_api import sync_playwright
 
-from .models import CrawlConfig, Menu, Report
+from .models import PHASES, CrawlConfig, Menu, Report
 from .urls import AUTH, canonical_url, public_url, visit_policy
 
 EXTRACT = Path(__file__).with_name("extract.js").read_text(encoding="utf-8")
@@ -32,6 +33,7 @@ class Crawler:
         self.pending: deque[tuple[str, int]] = deque()
         self.scheduled: set[str] = set()
         self.issue_keys: set[tuple] = set()
+        self.phase = "after" if config.mode == "login" else "before"
         self.pw = self.browser = self.context = self.page = None
 
     def snapshot(self):
@@ -42,6 +44,8 @@ class Crawler:
         for item in result["menus"]:
             for key in ["url", "source_url", "final_url"]:
                 item[key] = public_url(item[key])
+            if self.config.mode != "compare":
+                item["visibility"] = ""
         for item in result["pages"]:
             for key in ["url", "final_url"]:
                 item[key] = public_url(item.get(key, ""))
@@ -57,18 +61,21 @@ class Crawler:
         self.publish(self.snapshot())
 
     def issue(self, kind, url, reason):
-        key = kind, url, reason
+        key = kind, url, reason, self.phase
         if key not in self.issue_keys:
             self.issue_keys.add(key)
-            self.report.issues.append({"kind": kind, "url": url, "reason": reason})
+            self.report.issues.append({"kind": kind, "url": url, "reason": reason,
+                                       "phase": PHASES[self.phase], "resolved": ""})
 
     def open(self):
         self.pw = sync_playwright().start()
         choices = ["msedge", "chrome", "chromium"] if self.config.browser == "auto" else [self.config.browser]
+        # Optional: a specific Chromium binary (offline PCs, test machines).
+        custom = os.environ.get("MENU_CRAWLER_BROWSER_PATH", "")
         for channel in choices:
             try:
-                self.browser = self.pw.chromium.launch(headless=self.config.headless,
-                    **({"channel": channel} if channel != "chromium" else {}))
+                extra = {"channel": channel} if channel != "chromium" else {"executable_path": custom} if custom else {}
+                self.browser = self.pw.chromium.launch(headless=self.config.headless, **extra)
                 break
             except BrowserError:
                 continue
@@ -78,11 +85,16 @@ class Crawler:
         self.context.on("page", lambda p: p.on("dialog", lambda dialog: dialog.dismiss()))
         self.page = self.context.new_page()
         self.page.set_default_timeout(self.config.timeout_ms)
+        first = self.config.login_url if self.config.mode == "login" and self.config.login_url else self.config.url
         try:
-            self.page.goto(self.config.url, wait_until="domcontentloaded", timeout=self.config.timeout_ms)
+            self.page.goto(first, wait_until="domcontentloaded", timeout=self.config.timeout_ms)
         except BrowserError as exc:
-            self.issue("시작 페이지 접속 실패", self.config.url, self.error_text(exc))
-        self.emit("ready", "브라우저에서 필요한 로그인을 마친 후 수집 시작을 누르세요. 공개 사이트는 바로 시작해도 됩니다.")
+            self.issue("시작 페이지 접속 실패", first, self.error_text(exc))
+        self.emit("ready", {
+            "public": "브라우저가 열렸습니다. 로그인 없이 공개 메뉴를 수집합니다.",
+            "login": "열린 브라우저 창에서 로그인을 마친 뒤 로그인 후 수집을 시작하세요.",
+            "compare": "1단계: 로그인하지 않은 상태로 공개 메뉴를 먼저 수집합니다.",
+        }[self.config.mode])
 
     @staticmethod
     def error_text(exc):
@@ -123,32 +135,47 @@ class Crawler:
             # The requested inventory ends at level three. Do not visit or export
             # deeper destinations, or mislabel a level-four URL as level three.
             path, url, kind = path[:3], "", "group"
-        if kind == "group" and any(m.path == path and m.kind == "link" for m in self.items.values()):
-            return
+        inherited: set[str] = set()
+        if kind == "group":
+            links = [m for m in self.items.values() if m.path == path and m.kind == "link"]
+            if links:
+                self.mark_seen(links)
+                return
         if kind == "link":
             for key, m in list(self.items.items()):
                 if m.path == path and m.kind == "group":
+                    inherited.update(m.seen)
                     del self.items[key]
         # Prefer an actual navigation hierarchy over a duplicate generic page link.
-        if record.get("evidence") == "일반 링크" and any(m.url == url and m.evidence == "메뉴 DOM" for m in self.items.values()):
-            return
+        if record.get("evidence") == "일반 링크":
+            menus = [m for m in self.items.values() if m.url == url and m.evidence == "메뉴 DOM"]
+            if menus:
+                self.mark_seen(menus)
+                return
         if record.get("evidence") == "메뉴 DOM" and url:
             for key, m in list(self.items.items()):
                 if m.url == url and m.evidence == "일반 링크":
                     del self.items[key]
         key = tuple(path), url, source if kind == "dynamic" or review else ""
         if key in self.items:
+            self.mark_seen([self.items[key]])
             return
         status, reason = visit_policy(url, self.hosts)
         if kind == "group":
             status, reason = "분류 메뉴", "하위 메뉴를 묶는 제목이며 독립적인 페이지 주소는 없습니다."
         ident = hashlib.sha256(json.dumps(key, ensure_ascii=False).encode()).hexdigest()[:16]
-        menu = Menu(ident, path, url, source, record.get("evidence", "확인 필요"), kind, status, reason, hierarchy_review=review)
+        menu = Menu(ident, path, url, source, record.get("evidence", "확인 필요"), kind, status, reason, hierarchy_review=review,
+                    seen=sorted(inherited | {self.phase}))
         if url in self.results and status == "대기":
             self.apply_result(menu, self.results[url])
         self.items[key] = menu
         if menu.status == "대기":
             self.enqueue(url, hops + 1)
+
+    def mark_seen(self, menus):
+        for menu in menus:
+            if self.phase not in menu.seen:
+                menu.seen = sorted({*menu.seen, self.phase})
 
     @staticmethod
     def apply_result(menu, result):
@@ -206,7 +233,9 @@ class Crawler:
         except BrowserError:
             self.issue("동적 메뉴 확인", page.url, "일부 메뉴가 마우스 이동만으로 열리지 않았습니다. 직접 열어 현재 화면 추가를 사용하세요.")
 
-    def capture(self):
+    def capture(self, phase=None):
+        if phase:
+            self.phase = phase
         count = 0
         for page in list(self.context.pages):
             if page.is_closed():
@@ -219,10 +248,69 @@ class Crawler:
             self.harvest(page, 0, manual=True)
             self.hover_menus(page, 0)
             count += 1
-        self.emit("ready", f"열린 화면 {count}개에서 메뉴를 추가했습니다. 수집 시작을 누르면 접속 상태도 확인합니다.")
+        self.emit("ready", f"열린 화면 {count}개에서 메뉴를 추가했습니다({PHASES[self.phase]}). 수집을 시작하면 접속 상태도 확인합니다.")
 
-    def crawl(self):
+    def goto(self, url):
+        """Bring the login screen to the front of the collection browser."""
+        try:
+            if self.page.is_closed():
+                self.page = self.context.new_page()
+            self.page.goto(url, wait_until="domcontentloaded", timeout=self.config.timeout_ms)
+            self.page.bring_to_front()
+            self.emit(None, "로그인 화면을 열었습니다. 브라우저 창에서 로그인을 마친 뒤 로그인 후 수집을 시작하세요.")
+        except BrowserError as exc:
+            self.issue("로그인 화면 접속 실패", url, self.error_text(exc))
+            self.emit(None, "로그인 화면을 열지 못했습니다. 브라우저 창에서 직접 로그인 화면으로 이동하세요.")
+
+    def fill_login(self, username, password):
+        """Type credentials into the visible login form. The user presses the login button.
+
+        Values are used once and never stored in the report, logs or exports.
+        """
+        for page in reversed([p for p in self.context.pages if not p.is_closed()]):
+            for frame in page.frames:
+                try:
+                    fields = frame.locator('input[type="password"]:visible')
+                    if not fields.count():
+                        continue
+                    pw_field = fields.first
+                    user_field = pw_field.locator(
+                        'xpath=preceding::input[not(@type) or @type="text" or @type="email" or @type="tel" or @type="number"][1]')
+                    if username and user_field.count() and user_field.first.is_visible():
+                        user_field.first.fill(username)
+                    pw_field.fill(password)
+                    page.bring_to_front()
+                    self.report.login_check = ""
+                    self.emit(None, "아이디와 비밀번호를 입력했습니다. 보안문자·추가 인증이 있으면 완료하고, 로그인 버튼은 직접 누르세요.")
+                    return
+                except BrowserError:
+                    continue
+        self.emit(None, "비밀번호 입력란을 찾지 못했습니다. 브라우저 창에서 로그인 화면을 연 뒤 다시 시도하거나 직접 입력하세요.")
+
+    def login_screen_visible(self):
+        for page in self.context.pages:
+            if page.is_closed():
+                continue
+            try:
+                if page.locator('input[type="password"]:visible').count():
+                    return True
+            except BrowserError:
+                continue
+        return False
+
+    def crawl(self, phase=None):
+        if phase:
+            self.phase = phase
         self.stop.clear()
+        # A re-crawl replaces the warnings of the same phase; earlier phases stay as history.
+        label = PHASES[self.phase]
+        self.report.issues = [x for x in self.report.issues if x.get("phase") != label]
+        self.issue_keys = {k for k in self.issue_keys if k[3] != self.phase}
+        self.report.phase = self.phase
+        self.report.login_check = ""
+        if self.phase == "after" and self.login_screen_visible():
+            self.report.login_check = "열린 화면에 아직 비밀번호 입력란이 보입니다. 로그인이 끝났는지 확인하세요."
+            self.issue("로그인 상태 확인", canonical_url(self.page.url), self.report.login_check)
         self.report.pages = []
         self.report.visited_count = 0
         self.report.limit_reached = False
@@ -230,7 +318,11 @@ class Crawler:
         self.results.clear()
         self.pending.clear()
         self.scheduled.clear()
-        self.emit("crawling", "메뉴와 페이지를 확인하고 있습니다.")
+        if self.phase == "after" and "before" in self.report.phases_done:
+            for item in self.items.values():
+                if not item.status_before and "before" in item.seen:
+                    item.status_before = item.status
+        self.emit("crawling", f"{label} 상태로 메뉴와 페이지를 확인하고 있습니다.")
         for item in self.items.values():
             if item.kind == "link" and len(item.path) <= 3:
                 item.status, item.reason = visit_policy(item.url, self.hosts)
@@ -299,14 +391,29 @@ class Crawler:
             if menu.status == "대기":
                 menu.status = "미방문"
                 menu.reason = end_reason or "탐색 이동 제한 등으로 방문하지 못했습니다."
+        if self.phase == "after":
+            login_pages = sum(1 for p in self.report.pages if p["status"] in {"로그인 필요", "로그인·권한 확인"})
+            if self.report.pages and login_pages / len(self.report.pages) >= 0.3:
+                self.issue("로그인 세션 확인", self.config.url,
+                           f"로그인 후 수집인데 방문 페이지 {len(self.report.pages)}개 중 {login_pages}개가 로그인·권한 화면입니다. "
+                           "로그인이 풀렸거나 세션이 만료됐을 수 있습니다. 다시 로그인한 뒤 재수집하세요.")
+            for item in self.report.issues:
+                if item.get("phase") == PHASES["before"] and self.results.get(item.get("url"), {}).get("status") == "수집됨":
+                    item["resolved"] = "로그인 후 수집됨"
+        if self.phase not in self.report.phases_done:
+            self.report.phases_done.append(self.phase)
         self.report.finished_at = datetime.now(timezone.utc).isoformat()
         self.report.current_url = ""
-        self.emit("stopped" if self.stop.is_set() else "complete",
-                  "수집을 종료했습니다. 미수집·확인 필요 항목을 검토한 뒤 엑셀을 내려받으세요.")
+        if self.config.mode == "compare" and self.phase == "before" and not self.stop.is_set():
+            message = "1단계(로그인 전) 수집을 마쳤습니다. 다음은 로그인 단계입니다."
+        else:
+            message = "수집을 종료했습니다. 미수집·확인 필요 항목을 검토한 뒤 엑셀을 내려받으세요."
+        self.emit("stopped" if self.stop.is_set() else "complete", message)
 
 
 class Job:
     def __init__(self, config):
+        self.config = config
         self.stop = threading.Event()
         self.commands = queue.Queue()
         self.lock = threading.Lock()
@@ -322,29 +429,35 @@ class Job:
         with self.lock:
             return copy.deepcopy(self.data)
 
-    def command(self, name):
+    def command(self, name, **args):
         with self.lock:
             if self.data["state"] not in {"ready", "complete", "stopped"}:
                 raise ValueError("현재 작업을 마치거나 중지한 후 실행하세요.")
-            self.data["state"] = "crawling" if name == "crawl" else "capturing"
-        self.commands.put(name)
+            if name in {"crawl", "capture"}:
+                self.data["state"] = "crawling" if name == "crawl" else "capturing"
+        self.commands.put((name, args))
 
     def close(self):
         self.stop.set()
-        self.commands.put("close")
+        self.commands.put(("close", {}))
 
     def run(self, config):
         engine = Crawler(config, self.publish, self.stop)
         try:
             engine.open()
             while True:
-                command = self.commands.get()
+                command, args = self.commands.get()
                 if command == "close":
                     break
                 if command == "crawl":
-                    engine.crawl()
+                    engine.crawl(args.get("phase"))
                 elif command == "capture":
-                    engine.capture()
+                    engine.capture(args.get("phase"))
+                elif command == "goto":
+                    engine.goto(args["url"])
+                elif command == "fill":
+                    engine.fill_login(args.get("username", ""), args.get("password", ""))
+                args.clear()
         except Exception as exc:
             message = str(exc) if isinstance(exc, RuntimeError) else Crawler.error_text(exc)
             engine.issue("실행 오류", config.url, message)

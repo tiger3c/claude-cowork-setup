@@ -1,3 +1,4 @@
+import os
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -113,9 +114,14 @@ def test_local_api_session_and_export_route():
         assert load_workbook(BytesIO(result.content))["진단메뉴_01"]["H13"].value == "공지사항"
 
 
+def launch_options():
+    path = os.environ.get("MENU_CRAWLER_BROWSER_PATH")
+    return {"executable_path": path} if path else {}
+
+
 def test_real_browser_reads_hidden_nested_menu():
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
+        browser = pw.chromium.launch(headless=True, **launch_options())
         try:
             page = browser.new_page()
             page.set_content('''<base href="https://example.test/">

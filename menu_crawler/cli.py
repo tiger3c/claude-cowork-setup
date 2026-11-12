@@ -635,9 +635,9 @@ def ask_path(prompt):
 
 
 def choose_menus(confirmed, unverified, args, interactive):
-    """confirmed + (optionally) navigation menus that could not be confirmed, e.g. behind a login."""
+    """confirmed + (optionally) navigation menus that could not be confirmed, e.g. behind a login. Tidied for the sheet."""
     if not unverified:
-        return confirmed
+        return diag.tidy(confirmed)
     if interactive and getattr(args, "unverified_asked", False):
         print("  " + ui.dim(f"확인하지 못한 메뉴 {len(unverified)}개: " + ("포함" if args.include_unverified else "제외") + " (첫 대상에서 고른 대로)"))
     if not args.include_unverified and interactive and not getattr(args, "unverified_asked", False):
@@ -649,7 +649,7 @@ def choose_menus(confirmed, unverified, args, interactive):
         if any(k == "주소 없는 메뉴" for _, k in unverified):
             print("  " + ui.dim("주소 없는 메뉴 = 클릭하면 스크립트로 화면을 바꾸는 메뉴(javascript:). 진단 시트에는 메뉴 이름만 들어갑니다."))
         args.include_unverified = ask_yes("  이 메뉴도 진단 시트에 넣을까요? (이후 대상에도 같은 답을 적용)", True)
-    return confirmed + [d for d, _ in unverified] if args.include_unverified else confirmed
+    return diag.tidy(confirmed + [d for d, _ in unverified] if args.include_unverified else confirmed)
 
 
 

@@ -92,17 +92,27 @@ def test_last_work_file_is_offered_and_names_do_not_stack(tmp_path, monkeypatch)
     assert out.startswith("작업_메뉴입력_") and out.count("_메뉴입력_") == 1
 
 
-LEGACY = """<!doctype html><html lang="en"><head><title>Global Banking</title></head><body>
+LEGACY = """<!doctype html><html lang="en"><head><title>Global Banking</title>
+<script>function goMenu(c){ location.href='/menu.do?c=' + c; } function goForgot(){ location.href='/forgotid.do'; }
+function goLogin(){ location.href='/'; } function closePop(){}</script></head><body>
 <div id="wrap"><div id="topMenu"><ul>
+ <li><a href="javascript:goLogin()">Login</a></li>
  <li><a href="javascript:goMenu('A01')">Inquiry</a><ul>
    <li><a href="javascript:goMenu('A0101')">Account Inquiry</a><ul><li><a href="javascript:goMenu('A010101')">Balance</a></li>
      <li><a href="javascript:goMenu('A010102')">Transaction History</a></li></ul></li></ul></li>
  <li><a href="javascript:goMenu('B01')">Transfer</a><ul><li><a href="javascript:goMenu('B0101')">Domestic Transfer</a></li></ul></li>
  <li><a href="javascript:fnLogout()">Logout</a></li>
+ <li><a href="javascript:void(0)" class="btn-all">Open Whole Menu</a></li>
 </ul></div>
+<div id="allMenu"><ul><li><a href="javascript:goMenu('A0101')">Account Inquiry</a><ul><li><a href="javascript:goMenu('A010101')">Balance</a></li></ul></li></ul></div>
+<div class="login-box"><form action="/login" method="post"><input name="uid"><input type="password" name="pw">
+ <button type="submit">Login</button></form>
+ <a href="javascript:goForgot()">Forgot User ID</a> <a href="/forgotpw.do">Forgot Password</a></div>
 <div class="layer_popup" style="position:fixed;left:0;top:0;width:600px;height:500px;z-index:999;background:#fff">
  Notice <a href="javascript:closePop()">Do not show today</a></div>
 </div><script>window.open('/event', 'ev');</script></body></html>"""
+FORGOT_ID = """<html lang="en"><body><h1>Forgot User ID</h1><ul class="tab"><li><a href="#t1">User ID issued at the branch</a></li>
+<li><a href="#t2">User ID registered online</a></li></ul></body></html>"""
 
 
 def test_script_menus_on_a_legacy_english_site_are_filled(tmp_path, monkeypatch):
@@ -111,7 +121,8 @@ def test_script_menus_on_a_legacy_english_site_are_filled(tmp_path, monkeypatch)
 
     class Legacy(BaseHTTPRequestHandler):
         def do_GET(self):
-            body = LEGACY.encode() if self.path in ("/", "/index.do") else b"<html><body>event</body></html>"
+            pages = {"/": LEGACY, "/index.do": LEGACY, "/forgotid.do": FORGOT_ID}
+            body = pages.get(self.path.split("?")[0], "<html><body>page</body></html>").encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
@@ -126,15 +137,17 @@ def test_script_menus_on_a_legacy_english_site_are_filled(tmp_path, monkeypatch)
         wb = load_workbook(book)
         wb["02_빈시트"]["D6"] = f"http://127.0.0.1:{server.server_address[1]}/"
         wb.save(book)
-        asked = run(monkeypatch, tmp_path, [str(book), "02", "", "1", "n", "", "", ""])
-        assert any("주소 없는 메뉴" in a or "넣을까요" in a for a in asked)
+        run(monkeypatch, tmp_path, [str(book), "02", "", "1", "n", "", "", ""])
         out = next(tmp_path.glob("작업_메뉴입력_*[0-9].xlsx"))
         ws = load_workbook(out)["02_빈시트"]
-        cols = [[ws.cell(r, c).value for r in (13, 14, 15)] for c in range(8, 14) if ws.cell(13, c).value]
-        assert ["Inquiry", "Account Inquiry", "Balance"] in cols
-        assert ["Transfer", "Domestic Transfer", None] in cols
-        assert not any("Logout" in str(x) for col in cols for x in col)
-        assert not any(c[0] == "Inquiry" and c[1] is None for c in cols)     # parent is not its own column
+        cols = [[ws.cell(r, c).value for r in (13, 14, 15)] for c in range(8, 30) if ws.cell(13, c).value]
+        assert cols[:3] == [["Login", "Forgot User ID", "User ID issued at the branch"],
+                            ["Login", "Forgot User ID", "User ID registered online"], ["Login", "Forgot Password", None]]
+        assert ["Inquiry", "Account Inquiry", "Balance"] in cols and ["Transfer", "Domestic Transfer", None] in cols
+        assert ["Account Inquiry", "Balance", None] not in cols                     # copy from the whole-menu panel
+        names = [x for col in cols for x in col if x]
+        assert not {"Logout", "Open Whole Menu", "Do not show today"} & set(names)
+        assert ["Login", None, None] not in cols and ["Inquiry", None, None] not in cols
         # the menu-list files already on disk can fill a fresh copy without crawling again (two files: 2nd = duplicates)
         import shutil
         first_result = next((tmp_path / "결과").glob("*_메뉴목록_*.xlsx"))

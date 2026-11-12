@@ -236,3 +236,14 @@ def test_closed_input_stops_instead_of_looping(monkeypatch):
     monkeypatch.setattr("builtins.input", eof)
     with pytest.raises(SystemExit):
         cli.main([])
+
+
+def test_tidy_removes_parents_partial_copies_and_controls_and_puts_login_first():
+    menus = [["Corporate"], ["Corporate", "Cash Management"], ["Customer Center"],
+             ["Customer Center", "User Guide", "Service Hours"], ["User Guide", "Service Hours"], ["User Guide"],
+             ["Customer Center", "FAQ"], ["FAQ"], ["About Us"], ["Open Whole Menu"],
+             ["Login"], ["Login", "Forgot User ID", "User ID issued at the branch"], ["Login", "Forgot Password"]]
+    assert diag.tidy(menus) == [
+        ["Login", "Forgot User ID", "User ID issued at the branch"], ["Login", "Forgot Password", ""],
+        ["Corporate", "Cash Management", ""], ["Customer Center", "User Guide", "Service Hours"],
+        ["Customer Center", "FAQ", ""], ["About Us", "", ""]]

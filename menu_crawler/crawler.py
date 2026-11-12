@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+import re
 import os
 import queue
 import threading
@@ -17,6 +18,9 @@ from .models import PHASES, CrawlConfig, Menu, Report
 from .urls import AUTH, canonical_url, page_shape, public_url, visit_policy
 
 EXTRACT = Path(__file__).with_name("extract.js").read_text(encoding="utf-8")
+PAGE_FUNCTIONS = Path(__file__).with_name("page_functions.js").read_text(encoding="utf-8")
+# Script menus with these names are never clicked (state changes, not navigation).
+NO_CLICK = re.compile(r"(?:로그아웃|logout|log\s*out|sign\s*out|탈퇴|삭제|delete|remove|해지|취소|cancel|종료|exit|withdraw)", re.I)
 
 
 HIDE_POPUPS = """() => {
@@ -142,6 +146,93 @@ class Crawler:
             except BrowserError:
                 pass
 
+    def page_functions(self, page, prefixes):
+        """Tabs / choices inside an opened page become the next depth of the menu that opened it."""
+        prefixes = [p for p in prefixes if 1 <= len(p) < 3]
+        if not prefixes:
+            return
+        try:
+            labels = page.main_frame.evaluate(PAGE_FUNCTIONS)
+        except BrowserError:
+            return
+        source = canonical_url(page.url)
+        for prefix in prefixes:
+            for label in labels:
+                if label != prefix[-1]:
+                    self.add({"path": [*prefix, label], "url": "", "kind": "dynamic", "evidence": "화면 안 탭·선택",
+                              "hierarchy_review": False, "checked": "메뉴를 연 화면 안의 탭·선택 항목입니다."}, source, 1)
+
+    def explore(self, deadline):
+        """Click script menus (javascript:/onclick) one by one, like a person browsing, and read what opens.
+        Never clicks logout / delete / cancel-like names, form submit buttons or anything outside the menu area."""
+        todo = [m for m in self.items.values()
+                if m.kind == "dynamic" and m.status == "동작 확인 필요" and m.evidence in {"메뉴 DOM", "로그인 화면"}
+                and not NO_CLICK.search(" ".join(m.path)) and 1 <= len(m.path) <= 3]
+        if not todo:
+            return ""
+        self.emit("crawling", f"주소 없는 메뉴 {len(todo)}개를 눌러 열리는 화면을 확인합니다.")
+        for menu in todo:
+            if self.stop.is_set():
+                return "사용자가 수집을 중지했습니다."
+            if deadline is not None and time.monotonic() >= deadline:
+                return "최대 수집 시간에 도달했습니다."
+            self.report.current_url = f"{' > '.join(menu.path)} (누름)"
+            self.emit()
+            try:
+                self.click_menu(menu)
+            except BrowserError as exc:
+                menu.reason = "눌러서 확인하지 못했습니다: " + self.error_text(exc)
+            if self.config.delay_ms:
+                self.stop.wait(self.config.delay_ms / 1000)
+        return ""
+
+    def click_menu(self, menu):
+        page = self.page if not self.page.is_closed() else self.context.new_page()
+        self.page = page
+        if canonical_url(page.url) != menu.source_url:
+            page.goto(menu.source_url, wait_until="domcontentloaded", timeout=self.config.timeout_ms)
+            page.wait_for_timeout(self.config.wait_ms)
+        self.hide_layer_popups(page)
+        data = page.main_frame.evaluate(EXTRACT, {"customSelector": self.config.menu_selector})
+        hit = next((r for r in data["records"] if r.get("mc") and r["kind"] == "dynamic"
+                    and [" ".join(str(x).split())[:240] for x in r["path"]][:3] == menu.path), None)
+        if hit is None:
+            menu.reason = "메뉴를 다시 찾지 못해 눌러 보지 못했습니다."
+            return
+        before, start = list(self.context.pages), canonical_url(page.url)
+        self.closing_popups = False                  # a window this click opens is the menu's screen
+        try:
+            try:
+                # never a submit button (a <button> inside a form submits by default)
+                page.evaluate("""id => { const el = document.querySelector('[data-mc-id="' + id + '"]');
+                    if (el && el.type !== 'submit') el.click(); }""", hit["mc"])
+            except BrowserError:
+                pass                                   # the click navigated away: that is the expected case
+            page.wait_for_timeout(max(self.config.wait_ms, 800))
+        finally:
+            self.closing_popups = True
+        opened = [p for p in self.context.pages if p not in before and not p.is_closed()]
+        target = opened[0] if opened else page
+        try:
+            target.wait_for_load_state("domcontentloaded", timeout=self.config.timeout_ms)
+        except BrowserError:
+            pass
+        final = canonical_url(target.url)
+        if final and urlsplit(final).netloc.lower() not in self.hosts:
+            menu.status, menu.reason = "범위 밖", "누르면 수집 범위 밖 주소로 이동합니다."
+        elif opened or (final and final != start):
+            menu.status, menu.reason, menu.final_url = "수집됨", "메뉴를 눌러 열린 화면을 확인했습니다.", final
+            self.harvest(target, 1)
+            self.page_functions(target, [menu.path])
+        else:                                         # same page: a panel or tab opened in place
+            menu.status, menu.reason = "수집됨", "메뉴를 눌러 같은 화면 안의 내용을 확인했습니다."
+            self.page_functions(target, [menu.path])
+        for p in opened:
+            try:
+                p.close()
+            except BrowserError:
+                pass
+
     def hide_layer_popups(self, page):
         try:
             return page.evaluate(HIDE_POPUPS)
@@ -227,6 +318,8 @@ class Crawler:
                     seen=sorted(inherited | {self.phase}))
         if url in self.results and status == "대기":
             self.apply_result(menu, self.results[url])
+        if record.get("checked"):
+            menu.status, menu.reason = "수집됨", record["checked"]
         self.items[key] = menu
         if menu.status == "대기":
             self.enqueue(url, hops + 1)
@@ -453,6 +546,7 @@ class Crawler:
                     result.update(status="범위 밖 이동", reason="리다이렉트된 호스트가 수집 범위 밖입니다. 로그인 또는 호스트 설정을 확인하세요.")
                 else:
                     data = self.harvest(self.page, hops)
+                    self.page_functions(self.page, [m.path for m in self.items.values() if m.url == url and m.kind == "link"])
                     result["title"] = data["title"] if data else ""
                     code = result["http_status"]
                     if code in {401, 403}:
@@ -478,6 +572,8 @@ class Crawler:
             self.emit()
             if self.config.delay_ms:
                 self.stop.wait(self.config.delay_ms / 1000)
+        if not end_reason and self.config.click_menus:
+            end_reason = self.explore(deadline)
         if end_reason:
             self.report.limit_reached = True
             self.issue("수집 미완료", self.config.url, end_reason)

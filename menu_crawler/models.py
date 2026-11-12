@@ -29,6 +29,7 @@ class CrawlConfig(BaseModel):
     timeout_ms: int = Field(default=15000, ge=1000, le=60000)
     browser: Literal["auto", "msedge", "chrome", "chromium"] = "auto"
     menu_selector: str = Field(default="", max_length=500)
+    click_menus: bool = True       # open script (javascript:) menus by clicking them, never logout/delete-like names
     headless: bool = False
 
     @field_validator("url")

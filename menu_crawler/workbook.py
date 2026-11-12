@@ -441,7 +441,7 @@ def menus_from_report(report, include_unverified=False):
             script = m["status"] == SCRIPT_MENU
             if script and (m["kind"] != "dynamic" or ACTION_NAME.search(" ".join(m["path"]))):
                 continue                      # logout / delete links are not menus to diagnose
-            if (not m["ready"] and m["kind"] in {"link", "dynamic"} and m["evidence"] == "메뉴 DOM" and not m["hierarchy_review"]
+            if (not m["ready"] and m["kind"] in {"link", "dynamic"} and m["evidence"] in {"메뉴 DOM", "로그인 화면"} and not m["hierarchy_review"]
                     and 1 <= len(m["path"]) <= 3 and m["status"] in UNVERIFIED):
                 unverified.append(([clean(x) for x in (m["path"] + ["", "", ""])[:3]], "주소 없는 메뉴" if script else m["status"]))
         # a parent that only opens its children is not a separate menu column
@@ -451,6 +451,35 @@ def menus_from_report(report, include_unverified=False):
             return any(len([x for x in o if x]) > n and o[:n] == tuple(d)[:n] for o in paths)
         unverified = [(d, s) for d, s in unverified if not (s == "주소 없는 메뉴" and parent(d))]
     return confirmed, unverified
+
+
+CONTROL_NAME = re.compile(
+    r"^(?:(?:open|close|view|show|hide)\s+(?:the\s+)?(?:whole|all|full|entire)?\s*menus?|(?:whole|all|full)\s+menu|전체\s*메뉴(?:\s*(?:열기|닫기|보기))?"
+    r"|메뉴\s*(?:열기|닫기|보기|펼치기|접기)|open|close|닫기|열기|skip\b.*|본문\s*바로\s*가기|go\s+to\s+(?:top|content)|top|맨\s*위로|위로"
+    r"|prev(?:ious)?|next|이전|다음|more|더\s*보기|menu|메뉴|toggle(?:\s+menu)?)$", re.I)
+LOGIN_NAME = re.compile(r"^(?:log\s*in|sign\s*in|로그인)$", re.I)
+
+
+def tidy(menus):
+    """Menu columns for a 진단 시트:
+    - no screen controls ('Open Whole Menu', '전체메뉴', 'Close'...),
+    - no column for a parent that only groups its children (they carry it as 1/2 Depth),
+    - no partial copy of a deeper path ('User Guide > Demo' when 'Customer Center > User Guide > Demo' exists,
+      e.g. from a whole-menu panel or a side menu),
+    - login functions first."""
+    paths, seen = [], set()
+    for menu in menus:
+        d = [clean(x) for x in (list(menu) + ["", "", ""])[:3]]
+        if not d[0] or any(CONTROL_NAME.match(x) for x in d if x):
+            continue
+        if tuple(d) not in seen:
+            seen.add(tuple(d))
+            paths.append(d)
+    keys = [tuple(x for x in d if x) for d in paths]
+    parent = lambda k: any(len(o) > len(k) and o[:len(k)] == k for o in keys)                    # noqa: E731
+    partial = lambda k: any(len(o) > len(k) and o[-len(k):] == k and o[0] != k[0] for o in keys)  # noqa: E731
+    out = [d for d, k in zip(paths, keys) if not parent(k) and not partial(k)]
+    return [d for d in out if LOGIN_NAME.match(d[0])] + [d for d in out if not LOGIN_NAME.match(d[0])]
 
 
 def unverified_from_result(path):
@@ -463,7 +492,7 @@ def unverified_from_result(path):
         head = list(next(rows))
         col = {name: head.index(name) for name in ("1 Depth", "2 Depth", "3 Depth", "구분", "수집 상태", "구조 검토", "발견 근거")}
         for row in rows:
-            if (row[col["구분"]] in {"페이지 메뉴", "동적 메뉴"} and row[col["발견 근거"]] == "메뉴 DOM" and row[col["구조 검토"]] != "필요"
+            if (row[col["구분"]] in {"페이지 메뉴", "동적 메뉴"} and row[col["발견 근거"]] in {"메뉴 DOM", "로그인 화면"} and row[col["구조 검토"]] != "필요"
                     and row[col["수집 상태"]] in UNVERIFIED and row[col["1 Depth"]]
                     and not ACTION_NAME.search(" ".join(str(row[col[k]] or "") for k in ("1 Depth", "2 Depth", "3 Depth")))):
                 out.append(([clean(row[col[k]]) for k in ("1 Depth", "2 Depth", "3 Depth")], row[col["수집 상태"]]))

@@ -37,7 +37,7 @@
     breadcrumbs = breadcrumbs.filter((x, i) => x !== breadcrumbs[i - 1]);
   }
   const records = [];
-  let unnamed = 0;
+  let unnamed = 0, seq = 0;
   for (const root of roots) {
     // Validate the optional selector even on a page with no links.
     root.querySelectorAll(navSelector);
@@ -93,7 +93,31 @@
       const common = !nav && el.closest(commonSelector);
       const path = nav || common ? [...ancestors, label] : [...breadcrumbs, label];
       const evidence = nav ? "메뉴 DOM" : common ? "공통 링크" : breadcrumbs.length ? "본문 링크·현재 경로" : "일반 링크";
-      records.push({ path, url, label, kind: !url && children ? "group" : !url ? "dynamic" : "link", evidence, hierarchy_review: !nav });
+      const mc = String(seq++);
+      el.setAttribute("data-mc-id", mc);
+      records.push({ path, url, label, kind: !url && children ? "group" : !url ? "dynamic" : "link", evidence, hierarchy_review: !nav, mc });
+    }
+  }
+  // Functions of the login box (find ID, reset password, register...): menus of their own for a diagnosis.
+  const pw = document.querySelector('input[type="password"]');
+  if (pw) {
+    // The login box: the form, widened a few levels while it stays small and holds no menu area.
+    const holdsMenu = el => el.matches(navSelector + "," + legacySelector) || el.querySelector(navSelector + "," + legacySelector);
+    let box = pw.closest("form") || pw.parentElement;
+    for (let i = 0; i < 4 && box?.parentElement && box.parentElement !== document.body
+         && box.parentElement.querySelectorAll("a,button").length <= 12 && !holdsMenu(box.parentElement); i++) box = box.parentElement;
+    const loginNav = records.find(r => r.evidence === "메뉴 DOM" && r.path.length === 1 && /^(log\s*in|sign\s*in|로그인)$/i.test(r.label));
+    const top = loginNav ? loginNav.label : (/^ko/i.test(document.documentElement.lang || "ko") ? "로그인" : "Login");
+    for (const el of box ? box.querySelectorAll('a,button,[role="button"],input[type="button"]') : []) {
+      if (el.matches('[type="submit"]') || menuArea(el)) continue;
+      const label = clean(el.value || name(el));
+      if (!label || label.length > 60 || /^(log\s*in|sign\s*in|로그인|ok|확인|submit|cancel|취소|close|닫기)$/i.test(label)) continue;
+      const raw = el.getAttribute("href") || "";
+      let url = "";
+      try { if (raw && !/^(javascript:|#)/i.test(raw)) { const u = new URL(raw, document.baseURI); if (/^https?:$/.test(u.protocol)) url = u.href; } } catch {}
+      const mc = String(seq++);
+      el.setAttribute("data-mc-id", mc);
+      records.push({ path: [top, label], url, label, kind: url ? "link" : "dynamic", evidence: "로그인 화면", hierarchy_review: false, mc });
     }
   }
   return {

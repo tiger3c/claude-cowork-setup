@@ -717,27 +717,69 @@ def _host_path(url):
     return host, parts.path.rstrip("/").lower()
 
 
-def match_url(url, items):
-    """진단 시트 whose 대표 도메인 (D6) matches the inspection URL: same host, then the longest common path."""
+PAGE_FILE = re.compile(r"\.(?:jsp|jspx|do|action|html?|php|aspx?|cfm|nhn|xml)$", re.I)
+MATCH_REASON = {4: "대표 도메인 일치", 3: "대표 도메인보다 위 주소", 2: "같은 호스트·다른 경로", 1: "상위 도메인 일치"}
+
+
+def _base(path):
+    """'/app/index.jsp' -> '/app'; '/global.shinhan' stays (a context path, not a page file)."""
+    head, _, last = path.rpartition("/")
+    return head if PAGE_FILE.search(last) else path
+
+
+def match_levels(url, items):
+    """How well the inspection URL fits each sheet's 대표 도메인 (D6). -> (level, best sheets)
+    4 same host, URL inside the D6 path (or D6 is the bare host)  - e.g. D6 a.com, URL a.com/app/login.do
+    3 same host, D6 path inside the URL                          - e.g. D6 a.com/app, URL a.com/
+    2 same host, unrelated paths                                  - e.g. D6 a.com/bank, URL a.com/card
+    1 D6 is a parent domain of the URL host                       - e.g. D6 example.com, URL dev.example.com
+    Within a level the closest D6 wins (longest path / nearest parent domain); at level 3 every fit is returned."""
     host, path = _host_path(url)
     if not host:
-        return []
+        return 0, []
+    bare, path = host.split(":")[0], _base(path)
     scored = []
     for t in items:
-        best = -1
+        best = (0, 0)
         for address in t.addresses:
             h, p = _host_path(address)
-            if h != host:
+            if not h:
                 continue
-            p = p.rsplit("/", 1)[0] if "." in p.rsplit("/", 1)[-1] else p   # /index.jsp -> site root
-            if path == p or path.startswith(p + "/") or not p:
-                best = max(best, len(p))
-        if best >= 0:
+            p = _base(p)
+            if h == host:
+                if not p or path == p or path.startswith(p + "/"):
+                    score = (4, len(p))
+                elif not path or p.startswith(path + "/"):
+                    score = (3, -len(p))
+                else:
+                    score = (2, 0)
+            elif bare.endswith("." + h.split(":")[0]):
+                score = (1, len(h))
+            else:
+                continue
+            best = max(best, score)
+        if best[0]:
             scored.append((best, t))
     if not scored:
-        return []
-    best = max(n for n, _ in scored)
-    return [t for n, t in scored if n == best]
+        return 0, []
+    top = max(s for s, _ in scored)
+    if top[0] == 3:                     # the URL is above several services: never guess which one
+        return 3, [t for s, t in scored if s[0] == 3]
+    return top[0], [t for s, t in scored if s == top]
+
+
+def crawl_scope(target, url, items):
+    """Path to stay under when the sheet's service shares its host with another sheet ('' = whole host)."""
+    host = _host_path(url)[0]
+    mine = [_base(p) for h, p in (_host_path(a) for a in target.addresses) if h == host and _base(p)]
+    shared = any(o.sheet != target.sheet and any(_host_path(a)[0] == host for a in o.addresses) for o in items)
+    return max(mine, key=len) if mine and shared else ""
+
+
+def match_url(url, items):
+    """Sheets that clearly belong to the URL (levels 4 and 3); weaker fits need the user's confirmation."""
+    level, found = match_levels(url, items)
+    return found if level >= 3 else []
 
 
 def result_url(path):

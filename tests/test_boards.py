@@ -247,3 +247,28 @@ def test_tidy_removes_parents_partial_copies_and_controls_and_puts_login_first()
         ["Login", "Forgot User ID", "User ID issued at the branch"], ["Login", "Forgot Password", ""],
         ["Corporate", "Cash Management", ""], ["Customer Center", "User Guide", "Service Hours"],
         ["Customer Center", "FAQ", ""], ["About Us", "", ""]]
+
+
+def test_mapping_levels_for_dev_network_sub_urls():
+    root = diag.Target("01_root", d6="dev.example.com")
+    app = diag.Target("02_app", d6="https://shared.example.com/global.app")
+    card = diag.Target("03_card", d6="https://shared.example.com/card/index.jsp")
+    parent = diag.Target("04_parent", d6="example.org")
+    items = [root, app, card, parent]
+    assert diag.match_levels("https://dev.example.com/global.app/login.do", items) == (4, [root])
+    assert diag.match_levels("https://shared.example.com/global.app/main.do", items) == (4, [app])   # context path kept
+    assert diag.match_levels("https://shared.example.com/card/list.do", items) == (4, [card])
+    assert diag.match_levels("https://shared.example.com/", items) == (3, [app, card])            # above both: ask
+    assert diag.match_levels("https://shared.example.com/other", items)[0] == 2
+    assert diag.match_levels("https://u2lusdev.example.org/x", items) == (1, [parent])
+    assert diag.match_url("https://u2lusdev.example.org/x", items) == []                          # weak: ask first
+
+
+def test_crawl_scope_only_when_a_host_is_shared():
+    a = diag.Target("01_a", d6="https://shared.example.com/bank")
+    b = diag.Target("02_b", d6="https://shared.example.com/card/index.jsp")
+    c = diag.Target("03_c", d6="https://alone.example.com/app")
+    items = [a, b, c]
+    assert diag.crawl_scope(a, "https://shared.example.com/bank/main.do", items) == "/bank"
+    assert diag.crawl_scope(b, "https://shared.example.com/card/", items) == "/card"
+    assert diag.crawl_scope(c, "https://alone.example.com/app/x", items) == ""     # alone on its host: whole site

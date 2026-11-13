@@ -527,20 +527,31 @@ def load_targets(board):
         sys.exit(str(exc))
 
 
-def map_url(url, items, interactive, query=""):
-    """Inspection URL -> 진단 시트 by 대표 도메인 (D6). -> (sheet or None, sheets to choose from)."""
+def map_url(url, items, interactive, query="", stop_if_missing=True):
+    """Inspection URL -> 진단 시트 by 대표 도메인 (D6). -> (sheet or None, sheets to choose from).
+    Clear fits are taken; a fit by a different path or a parent domain is shown and confirmed."""
     if query:
         return None, items
-    found = diag.match_url(url, items)
-    if len(found) == 1:
-        ui.ok(f"대표 도메인 일치: {found[0].sheet}")
+    level, found = diag.match_levels(url, items)
+    reason = diag.MATCH_REASON.get(level, "")
+    if len(found) == 1 and level >= 3:
+        ui.ok(f"{reason}: {found[0].sheet}")
         return found[0], items
-    if found:
-        ui.note("대표 도메인이 같은 진단 시트가 여러 개입니다. 하나를 고르세요.")
+    if len(found) == 1 and interactive:
+        ui.note(f"{reason}: {found[0].sheet}  (D6: {found[0].addresses[0]})")
+        if ask_yes(f"  이 주소를 {found[0].sheet}에 기입할까요?", True):
+            return found[0], items
+        return None, items
+    if len(found) > 1:
+        ui.note(f"{reason} 후보가 여러 개입니다. 하나를 고르세요.")
+    elif level:
+        pass
     else:
-        ui.note("대표 도메인(D6)이 일치하는 진단 시트가 없습니다. 진단 대상을 입력하세요.")
+        ui.note("대표 도메인(D6)이 맞는 진단 시트가 없습니다. 진단 대상을 입력하세요.")
     if not interactive:
-        sys.exit("--sheet 로 진단 시트를 지정하세요. (진단 시트 D6에 대표 도메인을 적어 두면 자동으로 찾습니다)")
+        if stop_if_missing:
+            sys.exit("--sheet 로 진단 시트를 지정하세요. (진단 시트 D6에 대표 도메인을 적어 두면 자동으로 찾습니다)")
+        return None, items
     return None, found or items
 
 
@@ -731,7 +742,7 @@ def single_run(args):
 def campaign(args):
     """작업 엑셀 → 점검 주소(여러 개, 대표 도메인으로 시트 매핑) → 수집 방식 → 대상마다 수집·저장·기입 → 결과 표."""
     ui.header("웹 메뉴 수집기", "수집 -> 메뉴 목록 엑셀 -> 진단 시트 기입")
-    ui.step(1, 3, "작업할 진단 엑셀")
+    ui.step(1, 3, "진단표")
     board = choose_board(args, True)
     if board is None:
         args.collect_only = True
@@ -790,7 +801,10 @@ def campaign(args):
                     continue
             current = (t, url)
             try:
-                done.append(run_target(idx + 1, len(plan), t, url, login_url, mode, settings, board, args))
+                scope = diag.crawl_scope(t, url, items)
+                if scope:
+                    print("  " + ui.dim(f"같은 호스트에 다른 진단 대상이 있어 {scope} 아래만 수집합니다."))
+                done.append(run_target(idx + 1, len(plan), t, url, login_url, mode, {**settings, "path_prefix": scope}, board, args))
             except Exception as exc:  # noqa: BLE001 - one broken target must not stop the others
                 ui.fail(f"{t.sheet or '진단 시트'} 처리 중 오류: {type(exc).__name__}: {exc}")
                 done.append((Filled(t, "실패"), 0, "", url))
@@ -869,7 +883,7 @@ def fill_results(files, args):
             except (ValueError, OSError) as exc:
                 ui.fail(f"읽을 수 없는 파일이라 건너뜁니다: {exc}")
                 continue
-            hit, pool = map_url(url, items, interactive) if url else (None, items)
+            hit, pool = map_url(url, items, interactive, stop_if_missing=False) if url else (None, items)
             if hit is None:
                 if not interactive:
                     done.append((Filled(diag.Target(""), "시트 못 찾음"), len(menus), f.name, url))

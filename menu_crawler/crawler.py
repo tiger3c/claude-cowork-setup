@@ -218,8 +218,12 @@ class Crawler:
         except BrowserError:
             pass
         final = canonical_url(target.url)
+        prefix = self.config.path_prefix.rstrip("/").lower()
+        fpath = urlsplit(final).path.lower() if final else ""
         if final and urlsplit(final).netloc.lower() not in self.hosts:
             menu.status, menu.reason = "범위 밖", "누르면 수집 범위 밖 주소로 이동합니다."
+        elif prefix and final and fpath != prefix and not fpath.startswith(prefix + "/"):
+            menu.status, menu.reason = "범위 밖", f"누르면 같은 호스트의 다른 서비스({fpath})로 이동합니다."
         elif opened or (final and final != start):
             menu.status, menu.reason, menu.final_url = "수집됨", "메뉴를 눌러 열린 화면을 확인했습니다.", final
             self.harvest(target, 1)
@@ -264,6 +268,12 @@ class Crawler:
         if hops > self.config.max_hops:
             self.issue("탐색 이동 제한", url, "최대 이동 횟수 때문에 이 주소는 방문하지 못했습니다.")
             return
+        prefix = self.config.path_prefix.rstrip("/")
+        if prefix and url not in {self.config.url, self.config.login_url}:
+            path = urlsplit(url).path.lower()
+            if path != prefix.lower() and not path.startswith(prefix.lower() + "/"):
+                self.issue("경로 범위 밖", url, f"같은 호스트의 다른 서비스라 {prefix} 아래만 수집했습니다.")
+                return
         shape = page_shape(url)
         seen = self.shapes.get(shape, 0)
         self.shapes[shape] = seen + 1

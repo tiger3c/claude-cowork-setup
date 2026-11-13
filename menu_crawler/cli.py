@@ -143,9 +143,9 @@ def build_config(args):
     settings = base_settings(args)
     advanced_settings(args, settings, interactive)
 
-    headless = args.headless and mode == "public"
+    headless = args.headless
     if args.headless and mode != "public":
-        print("  ※ 로그인할 수 있는 방식이라 브라우저 창을 띄워서 실행합니다.")
+        print("  ※ 창 없이(--headless) 실행하면 로그인 단계에서 직접 로그인할 수 없습니다.")
     args.auto_login = mode == "auto"
 
     if mode != "public" and interactive:
@@ -271,10 +271,13 @@ def login_step(job, config, username=None):
         print("  [a] 아이디/비밀번호 자동 입력 (로그인 버튼은 직접 누름)")
         print("  [o] 로그인 화면 다시 열기")
         print("  [c] 지금 열린 화면의 메뉴만 추가")
+        print("  [p] 로그인 없이 공개 메뉴만 수집 (계정 문제 등으로 로그인이 안 될 때)")
         print("  [q] 로그인 없이 종료하고 지금까지 결과 저장")
         choice = ask("  선택").lower()
         if choice == "":
             return True
+        if choice in {"p", "ㅔ"}:
+            return "public"
         if choice in {"a", "ㅁ"}:
             Account.username = ask("  아이디", Account.username)
             autofill(job, Account.username)
@@ -906,7 +909,15 @@ def run_crawl(config, args, auto=False):
                 return data, None
             print("  " + ui.bold("로그인 화면만 보입니다. 로그인한 뒤 메뉴를 수집합니다."))
         if config.mode in {"login", "compare"} and not job.stop.is_set():
-            if login_step(job, config, args.username):
+            step = login_step(job, config, args.username)
+            if step == "public":
+                if config.mode == "compare":
+                    print("  로그인 전 수집 결과만 남깁니다.")
+                    data = job.snapshot()
+                else:
+                    print("\n  [로그인 없이] 공개 메뉴 수집")
+                    data = crawl(job, "before")
+            elif step:
                 print("\n  [로그인 후] 메뉴 수집")
                 data = crawl(job, "after")
             else:
@@ -1295,7 +1306,7 @@ def run_target(i, total, t, url, login_url, mode, settings, board, args):
     try:
         config = CrawlConfig(url=url, mode=engine_mode(mode), site_name=(t.name or t.sheet or urlsplit(url).hostname or "메뉴 수집")[:120],
                              login_url=login_url, extra_hosts=args.extra_host, browser=args.browser,
-                             menu_selector=args.selector, headless=args.headless and mode in {"public", "auto"}, **settings)
+                             menu_selector=args.selector, headless=args.headless, **settings)
     except ValidationError as exc:
         ui.fail("입력값 오류: " + "; ".join(e["msg"] for e in exc.errors()))
         return Filled(t, "실패"), 0, "", url

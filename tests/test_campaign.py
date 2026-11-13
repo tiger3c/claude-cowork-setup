@@ -321,3 +321,15 @@ def test_my_browser_mode_attaches_crawls_and_leaves_the_browser_open(site, tmp_p
         assert not any(u.rstrip("/") == site for u in urls)
     finally:
         subprocess.run(["pkill", "-f", str(tmp_path / "browser_profile")], check=False)
+
+
+def test_login_step_can_fall_back_to_public_menus(site, tmp_path, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(cli, "login_step", lambda job, config, username=None: "public")
+    book = book_with_domains(tmp_path / "작업.xlsx")
+    wb = load_workbook(book)
+    wb["02_빈시트"]["D6"] = site
+    wb.save(book)
+    # mode 3 = after login only; the account fails, so 'p' collects the public menus instead
+    run(monkeypatch, tmp_path, [str(book), "02", "", "3", "1", "n", "n", "", "", "", ""])
+    ws = load_workbook(next(tmp_path.glob("작업_메뉴입력_*[0-9].xlsx")))["02_빈시트"]
+    assert "고객센터" in [ws.cell(13, c).value for c in range(8, 14)]

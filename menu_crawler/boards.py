@@ -62,6 +62,12 @@ class SheetsBoard:
         self.label = f"구글 시트 자동 입력 · {self.title}" + (f" ({self.client.name})" if self.client.name else "")
         return items
 
+    def columns(self, sheet):
+        return self.client.columns(sheet)
+
+    def clear(self, sheet, items):
+        return self.client.clear(sheet, items)
+
     def fill(self, target, menus, interactive, out_dir):
         try:
             pre = self.client.fill(target.sheet, menus, dry_run=True)
@@ -188,6 +194,21 @@ class ExcelBoard:
             return Filled(target, "새 메뉴 없음", duplicates=len(p.duplicates), overflow=len(p.overflow))
         ui.ok(f"‘{target.sheet}’ {where}에 {len(p.to_write)}개 입력했습니다." + (" 대표 도메인(D6)도 적었습니다." if p.cells else ""))
         return Filled(target, "입력 완료", where, len(p.to_write), len(p.duplicates), len(p.overflow), str(self.out.resolve()))
+
+    def columns(self, sheet):
+        return diag.menu_columns(self.current, sheet)
+
+    def clear(self, sheet, items):
+        """Empty rows 13~15 of the given columns in the output copy (re-checked against the current file)."""
+        now = {c["col"]: c for c in diag.menu_columns(self.current, sheet)}
+        ok = [i for i in items if i["col"] in now and now[i["col"]]["menu"] == i["menu"] and not now[i["col"]]["results"]]
+        if not ok:
+            return {"cleared": [], "skipped": [i["col"] for i in items]}
+        p = diag.Plan(sheet, [], 0, cells={f"{diag.L(i['col'])}{r}": "" for i in ok for r in diag.MENU_ROWS})
+        if not self._save(p, True):
+            return {"cleared": [], "skipped": [i["col"] for i in items]}
+        self.current = self.out
+        return {"cleared": [i["col"] for i in ok], "skipped": [i["col"] for i in items if i not in ok]}
 
     def _save(self, p, interactive):
         """Write the plan into the output copy. The copy is replaced only after the new file verified."""

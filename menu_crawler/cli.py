@@ -611,7 +611,7 @@ def choose_board(args, interactive):
             last = "" if linked else state.last_workbook()
             if linked:
                 print("  " + ui.bold("구글 시트 주소 붙여넣기 또는 Enter(지난번 시트)") + ui.dim("  = 구글 시트에 바로 입력, 값만 입력"))
-                print("  " + ui.dim("엑셀 파일로 하려면 파일을 끌어다 놓기 | p = 구글 시트 붙여넣기 | - = 기입 없이 수집만"))
+                print("  " + ui.dim("엑셀 파일로 하려면 파일을 끌어다 놓기 | p = 구글 시트 붙여넣기 | - = 기입 없이 수집만 | c = 정리 점검"))
             else:
                 print("  작업할 진단 엑셀 파일을 붙여넣어 주세요. (파일을 이 창에 끌어다 놓아도 됩니다)")
                 if last:
@@ -622,6 +622,10 @@ def choose_board(args, interactive):
                 value = ask("  진단표" if linked else "  작업 엑셀").strip().strip('"').strip("'").strip()
                 if gsheet.sheet_ref(value):            # a Google Sheets address pasted right here
                     args.sheet_url, value = value, "g"
+                if value.lower() in {"c", "ㅊ"}:
+                    args.check = True
+                    print("  " + ui.bold("정리 점검") + ui.dim(": 이미 들어간 메뉴 열 중 잘못 들어간 열을 찾습니다. 이어서 진단표를 고르세요."))
+                    continue
                 if not value and linked:
                     value = "g"
                 if not value and last:
@@ -823,6 +827,7 @@ def parse_args(argv=None):
     p.add_argument("--headless", action="store_true", help="브라우저 창 없이 실행 (로그인 전 수집만)")
     p.add_argument("--no-click", action="store_true", help="javascript: 메뉴를 눌러 보지 않음")
     p.add_argument("--my-browser", action="store_true", help="내 브라우저 창에서 로그인 (인증서·OTP·보안 프로그램이 필요한 사이트)")
+    p.add_argument("--check", action="store_true", help="정리 점검: 이미 들어간 메뉴 열 중 잘못 들어간 열을 찾아 비움")
     p.add_argument("-y", "--yes", action="store_true", help="확인 질문 없이 바로 실행 (점검 권한 확인 완료로 간주)")
     p.add_argument("--no-open", action="store_true", help="저장 후 엑셀을 자동으로 열지 않음")
     p.add_argument("--workbook", default="", help="메뉴를 입력할 진단 엑셀(.xlsx) 경로")
@@ -985,6 +990,8 @@ def campaign(args):
     ui.header("웹 메뉴 수집기", "수집 -> 메뉴 목록 엑셀 -> 진단 시트 기입")
     ui.step(1, 3, "진단표")
     board = choose_board(args, True)
+    if args.check and board is not None:
+        return check_board(board, args)
     if board is None:
         args.collect_only = True
         return single_run(args)
@@ -1181,6 +1188,53 @@ def fill_results(files, args):
         print()
         ui.note("중단했습니다. 지금까지 한 작업을 정리합니다.")
     report(done, board, "", args)
+
+
+def check_board(board, args):
+    """정리 점검: list wrong menu columns already on the sheets, and empty them only after the user agrees."""
+    if isinstance(board, PasteBoard):
+        sys.exit("정리 점검은 구글 시트 연결 또는 엑셀 파일에서만 됩니다.")
+    items = [t for t in load_targets(board) if t.menus]
+    ui.header("정리 점검", f"{board.label}")
+    if not items:
+        ui.ok("메뉴가 들어간 진단 시트가 없습니다.")
+        return
+    print(f"  메뉴가 들어간 진단 시트 {len(items)}개")
+    ui.grid([f"{t.sheet} ({t.menus})" for t in items])
+    raw = ask("  점검할 시트 (Enter = 모두, 번호·이름·범위도 됨)")
+    try:
+        picked = diag.select_targets(raw, items) if raw else items
+    except ValueError as exc:
+        sys.exit(str(exc))
+    total = 0
+    for t in picked:
+        print()
+        print("  " + ui.bold(f"> {t.sheet}"))
+        try:
+            found = diag.audit(board.columns(t.sheet))
+        except (ValueError, SheetError) as exc:
+            ui.fail(str(exc))
+            continue
+        if not found:
+            ui.ok("이상 없음")
+            continue
+        ui.table([("열", 4), ("이유", 30), ("결과", 6), ("메뉴", 0)],
+                 [[diag.L(f["col"]), f["reason"], f"{f['results']}개" if f["results"] else "-",
+                   " > ".join(x for x in f["menu"] if x)] for f in found], indent="    ")
+        safe = [f for f in found if not f["results"]]
+        if len(safe) < len(found):
+            ui.note(f"진단 결과가 있는 열 {len(found) - len(safe)}개는 비우지 않습니다. 확인 후 직접 정리하세요.")
+        if not safe or not ask_yes(f"  위 열 중 {len(safe)}개의 메뉴 이름(13~15행)을 비울까요?", False):
+            continue
+        res = board.clear(t.sheet, safe)
+        total += len(res["cleared"])
+        ui.ok(f"{len(res['cleared'])}개 열을 비웠습니다: {', '.join(diag.L(c) for c in res['cleared'])}")
+        if res["skipped"]:
+            ui.note(f"그사이 바뀌었거나 결과가 생긴 열 {len(res['skipped'])}개는 건너뛰었습니다.")
+    print()
+    if isinstance(board, ExcelBoard) and board.current != board.src:
+        ui.ok(f"정리한 진단 엑셀 (원본은 그대로): {board.out.resolve()}")
+    ui.ok(f"정리 점검을 마쳤습니다. 비운 열 {total}개")
 
 
 def write_log(done, board, mode):

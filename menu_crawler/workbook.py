@@ -382,7 +382,7 @@ def _verify(path, p):
                 raise RuntimeError(f"저장 검증 실패: {L(col)}{r}에 '{text}'가 기록되지 않았습니다. 파일을 만들지 않았습니다.")
     if p.cells:
         got = cell_values(path, p.sheet, p.cells)
-        bad = [ref for ref, text in p.cells.items() if got.get(ref) != clean(text)]
+        bad = [ref for ref, text in p.cells.items() if got.get(ref, "") != clean(text, 2000)]
         if bad:
             raise RuntimeError(f"저장 검증 실패: {', '.join(bad)}. 파일을 만들지 않았습니다.")
 
@@ -492,6 +492,42 @@ def tidy(menus):
     partial = lambda k: any(len(o) > len(k) and o[-len(k):] == k and o[0] != k[0] for o in keys)  # noqa: E731
     out = [d for d, k in zip(paths, keys) if not parent(k) and not partial(k)]
     return [d for d in out if LOGIN_NAME.match(d[0])] + [d for d in out if not LOGIN_NAME.match(d[0])]
+
+
+def audit(columns):
+    """Clean-up check of menu columns already on a sheet.
+    columns: [{"col", "menu": [d1, d2, d3], "results": n}] -> the suspicious ones with a reason (same rules as tidy)."""
+    keys = [tuple(x for x in c["menu"] if x) for c in columns]
+    out, seen = [], set()
+    for c, k in zip(columns, keys):
+        reason = ""
+        if any(CONTROL_NAME.match(x) for x in k):
+            reason = "화면 조작 버튼"
+        elif k in seen:
+            reason = "같은 경로 중복"
+        elif any(len(o) > len(k) and o[:len(k)] == k for o in keys):
+            reason = "상위 메뉴만 있는 열 (하위 메뉴 열이 따로 있음)"
+        elif any(len(o) > len(k) and o[-len(k):] == k and o[0] != k[0] for o in keys):
+            reason = "경로 일부 복사본 (더 긴 경로가 따로 있음)"
+        seen.add(k)
+        if reason:
+            out.append({**c, "reason": reason})
+    return out
+
+
+def menu_columns(path, sheet):
+    """Menu columns of an Excel 진단 시트, in the same shape as the Apps Script 'columns' answer."""
+    wb = Workbook(path)
+    root = wb.root(sheet)
+    check_layout(wb, sheet, root)
+    grid = wb.grid(sheet, root)
+    out = []
+    for col in sorted({c for (c, r) in grid if r in MENU_ROWS}):
+        menu = ["" if grid.get((col, r), "") in MARKERS else clean(grid.get((col, r), "")) for r in MENU_ROWS]
+        formula = any(grid.get((col, r)) == "=formula" for r in MENU_ROWS)
+        if any(menu) and not formula:
+            out.append({"col": col, "menu": menu, "results": sum(1 for r in RESULT_ROWS if (col, r) in grid)})
+    return out
 
 
 def unverified_from_result(path):

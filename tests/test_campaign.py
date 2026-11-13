@@ -393,3 +393,34 @@ def test_last_targets_and_mode_are_reused_with_enter(site, tmp_path, monkeypatch
     assert state.pref("targets") == "02" and state.pref("mode") == "public"
     asked = run(monkeypatch, tmp_path, [str(book), "", "", "", "n", "", ""])     # Enter = last targets, last mode
     assert any("지난번 02" in a for a in asked) and any("번호 [2]" in a for a in asked)
+
+
+def test_cleanup_check_on_google_sheet(tmp_path, monkeypatch, gas):
+    port, state_ = gas([{"name": "09_정리", "cells": {
+        **FORM, "D6": "https://a.example.com",
+        "H13": "Open/Close Menu",
+        "I13": "Customer Center",
+        "J13": "Customer Center", "J14": "User Guide", "J15": "Demo",
+        "K13": "User Guide", "K14": "Demo",
+        "L13": "FAQ", "M13": "Customer Center", "M14": "FAQ", "L20": "양호"}}])
+    url = f"https://docs.google.com/spreadsheets/d/{BOOK}/edit"
+    run(monkeypatch, tmp_path, ["c", url, "", "y"])
+    cells = state_()[0]["cells"]
+    assert "H13" not in cells and "I13" not in cells and "K13" not in cells and "K14" not in cells   # cleared
+    assert cells["J13"] == "Customer Center" and cells["M14"] == "FAQ"                              # real menus stay
+    assert cells["L13"] == "FAQ" and cells["L20"] == "양호"                                          # has a result: kept
+    assert all(k[1:] in {"13", "14", "15"} for k in state_()[0]["writes"])
+
+
+def test_cleanup_check_on_excel_copy(tmp_path, monkeypatch):
+    book = book_with_domains(tmp_path / "작업.xlsx")
+    wb = load_workbook(book)
+    ws = wb["02_빈시트"]
+    ws["H13"], ws["I13"], ws["I14"], ws["J13"] = "전체메뉴 열기/닫기", "조회", "계좌조회", "조회"
+    wb.save(book)
+    before = book.read_bytes()
+    run(monkeypatch, tmp_path, ["c", str(book), "02", "y"])
+    out = next(tmp_path.glob("작업_메뉴입력_*[0-9].xlsx"))
+    ws = load_workbook(out)["02_빈시트"]
+    assert (ws["H13"].value, ws["J13"].value) == (None, None) and (ws["I13"].value, ws["I14"].value) == ("조회", "계좌조회")
+    assert book.read_bytes() == before

@@ -117,3 +117,9 @@ class Client:
     def fill(self, sheet, menus, dry_run=False, domain=""):
         rows = [[diag.clean(x) for x in (list(m) + ["", "", ""])[:3]] for m in menus]
         return self.call("fill", sheet=sheet, menus=[r for r in rows if r[0]], dryRun=dry_run, domain=diag.clean(domain))
+
+    def columns(self, sheet):
+        return self.call("columns", sheet=sheet)["columns"]
+
+    def clear(self, sheet, items):
+        return self.call("clear", sheet=sheet, columns=[{"col": i["col"], "menu": i["menu"]} for i in items])

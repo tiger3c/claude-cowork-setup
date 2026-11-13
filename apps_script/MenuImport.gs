@@ -55,6 +55,8 @@ function doPost(e) {
     if (req.action === 'ping') return reply({ ok: true, title: ss.getName(), url: ss.getUrl() });
     if (req.action === 'targets') return reply({ ok: true, title: ss.getName(), targets: listTargets(ss) });
     if (req.action === 'fill') return reply(fillSheet(ss, req));
+    if (req.action === 'columns') return reply(menuColumns(ss, req));
+    if (req.action === 'clear') return reply(clearColumns(ss, req));
     return reply({ ok: false, error: '알 수 없는 요청입니다: ' + req.action });
   } catch (err) {
     return reply({ ok: false, error: String((err && err.message) || err) });
@@ -147,6 +149,48 @@ function fillSheet(ss, req) {
     if (!req.dryRun) SpreadsheetApp.flush();
     p.written = req.dryRun ? 0 : p.write.length;
     return p;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Menu columns of a sheet for the clean-up check: [{col, menu: [d1, d2, d3], results: n, formula: bool}]. */
+function menuColumns(ss, req) {
+  var sh = ss.getSheetByName(req.sheet);
+  if (!sh) return { ok: false, error: '시트를 찾을 수 없습니다: ' + req.sheet };
+  if (!layoutOk(sh)) return { ok: false, error: "'" + req.sheet + "' 시트의 13~15행이 1·2·3 Depth 행이 아닙니다." };
+  var area = readArea(sh), out = [];
+  for (var c = 0; c <= area.lastCol - FIRST_COL; c++) {
+    var menu = [0, 1, 2].map(function (r) { return cleanText(area.menus[r][c]); });
+    if (!menu.some(function (x) { return x; })) continue;
+    var results = area.results.filter(function (row) { return cleanText(row[c]) !== ''; }).length;
+    out.push({ col: FIRST_COL + c, menu: menu, results: results });
+  }
+  return { ok: true, sheet: req.sheet, columns: out };
+}
+
+/** Empty rows 13~15 of the given columns, only when they still hold exactly the expected names and no result. */
+function clearColumns(ss, req) {
+  var sh = ss.getSheetByName(req.sheet);
+  if (!sh) return { ok: false, error: '시트를 찾을 수 없습니다: ' + req.sheet };
+  if (!layoutOk(sh)) return { ok: false, error: "'" + req.sheet + "' 시트의 13~15행이 1·2·3 Depth 행이 아닙니다." };
+  var lock = LockService.getDocumentLock() || LockService.getScriptLock();
+  if (!lock.tryLock(30000)) return { ok: false, error: '다른 사용자가 입력 중입니다. 잠시 후 다시 시도하세요.' };
+  try {
+    var area = readArea(sh), cleared = [], skipped = [];
+    (req.columns || []).forEach(function (item) {
+      var c = Number(item.col) - FIRST_COL;
+      if (!(c >= 0 && c <= area.lastCol - FIRST_COL)) { skipped.push(item.col); return; }
+      var now = [0, 1, 2].map(function (r) { return cleanText(area.menus[r][c]); });
+      var want = [0, 1, 2].map(function (i) { return cleanText((item.menu || [])[i]); });
+      var formula = sh.getRange(MENU_ROW, Number(item.col), 3, 1).getFormulas().some(function (r) { return r[0]; });
+      var results = area.results.some(function (row) { return cleanText(row[c]) !== ''; });
+      if (formula || results || now.join('\u0001') !== want.join('\u0001')) { skipped.push(item.col); return; }
+      sh.getRange(MENU_ROW, Number(item.col), 3, 1).setValues([[''], [''], ['']]);   // values only, formats stay
+      cleared.push(item.col);
+    });
+    SpreadsheetApp.flush();
+    return { ok: true, sheet: req.sheet, cleared: cleared, skipped: skipped };
   } finally {
     lock.releaseLock();
   }

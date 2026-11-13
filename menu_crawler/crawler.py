@@ -64,6 +64,7 @@ class Crawler:
         self.guarding = False
         self.own_pages = []
         self.guarded = []
+        self.open_dialogs = []
         self.blocked = 0
         self.issue_keys: set[tuple] = set()
         self.phase = "after" if config.mode == "login" else "before"
@@ -169,11 +170,21 @@ class Crawler:
     def on_dialog(self, dialog):
         """alert/confirm: dismissed while crawling; while the user logs in they are the user's to answer."""
         if not self.guarding:
+            self.open_dialogs.append(dialog)          # the user may answer it; closed at the next crawl if still open
             return
         try:
             dialog.dismiss()
         except BrowserError:
             pass                                      # already answered by the user
+
+    def close_dialogs(self):
+        """A dialog left open from the login step would hold the page: close what is still open."""
+        dialogs, self.open_dialogs = self.open_dialogs, []
+        for dialog in dialogs:
+            try:
+                dialog.dismiss()
+            except BrowserError:
+                pass                                  # the user had already answered it
 
     def set_guard(self, page, on):
         """The request guard is installed only while crawling. Requests are answered by this thread, so a guard
@@ -543,6 +554,7 @@ class Crawler:
             self.issue("동적 메뉴 확인", page.url, "일부 메뉴가 마우스 이동만으로 열리지 않았습니다. 직접 열어 현재 화면 추가를 사용하세요.")
 
     def capture(self, phase=None):
+        self.close_dialogs()
         if phase:
             self.phase = phase
         count = 0
@@ -561,6 +573,7 @@ class Crawler:
 
     def goto(self, url):
         """Bring the login screen to the front of the collection browser."""
+        self.close_dialogs()
         try:
             if self.page.is_closed():
                 self.page = self.new_tab()
@@ -576,6 +589,7 @@ class Crawler:
 
         Values are used once and never stored in the report, logs or exports.
         """
+        self.close_dialogs()
         pages = [p for p in self.mine() + list(reversed(self.context.pages)) if not p.is_closed()]
         for page in dict.fromkeys(pages):
             if urlsplit(canonical_url(page.url)).netloc.lower() not in self.hosts:
@@ -635,6 +649,7 @@ class Crawler:
 
     def crawl(self, phase=None, resume=False):
         self.closing_popups = self.guarding = True
+        self.close_dialogs()
         for page in self.mine():
             self.set_guard(page, True)
         try:

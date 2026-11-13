@@ -260,8 +260,8 @@ def test_mapping_levels_for_dev_network_sub_urls():
     assert diag.match_levels("https://shared.example.com/card/list.do", items) == (4, [card])
     assert diag.match_levels("https://shared.example.com/", items) == (3, [app, card])            # above both: ask
     assert diag.match_levels("https://shared.example.com/other", items)[0] == 2
-    assert diag.match_levels("https://u2lusdev.example.org/x", items) == (1, [parent])
-    assert diag.match_url("https://u2lusdev.example.org/x", items) == []                          # weak: ask first
+    assert diag.match_levels("https://dev01.example.org/x", items) == (1, [parent])
+    assert diag.match_url("https://dev01.example.org/x", items) == []                          # weak: ask first
 
 
 def test_crawl_scope_only_when_a_host_is_shared():

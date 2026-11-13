@@ -451,7 +451,7 @@ def test_saved_account_is_only_typed_into_the_same_site(monkeypatch):
     scripted(monkeypatch, [""])
     cli.login_step(FakeJob(), CrawlConfig(url="https://dev.client-a.com/"))
     assert filled == [("fill", "consultant", "pw")]                 # same site: filled
-    assert cli.site_of("https://u2lusdev.example.co.kr/x") == "example.co.kr"
+    assert cli.site_of("https://dev01.example.co.kr/x") == "example.co.kr"
 
 
 
@@ -628,6 +628,7 @@ def test_page_keeps_loading_while_the_user_logs_in(tmp_path):
     seen = []
     page = ("<html><body><form><input name=id><input type=password name=pw><button type=submit>Login</button></form>"
             "<script>setTimeout(() => fetch('/late-screen.xml'), 400); setTimeout(() => fetch('/late-post', {method: 'POST'}), 600);"
+            "setTimeout(() => { alert('already signed in'); fetch('/after-alert'); }, 900);"
             "</script></body></html>")
 
     class Lazy(BaseHTTPRequestHandler):
@@ -653,6 +654,13 @@ def test_page_keeps_loading_while_the_user_logs_in(tmp_path):
         time.sleep(2)                                   # the user is logging in; the crawler is idle
         assert ("GET", "/late-screen.xml") in seen     # screens that load after the first paint (WebSquare) arrive
         assert ("POST", "/late-post") in seen           # the login request itself is not blocked either
+        assert ("GET", "/after-alert") not in seen     # an alert during login is left to the user, not auto-closed
+        job.command("crawl", phase="after")             # the user starts the crawl with the alert still open
+        end = time.monotonic() + 40
+        while job.snapshot()["state"] == "crawling" and time.monotonic() < end:
+            time.sleep(0.2)
+        assert job.snapshot()["state"] == "complete"    # the leftover alert was closed, the crawl did not hang
+        assert ("GET", "/after-alert") in seen
     finally:
         job.close()
         job.thread.join(timeout=10)

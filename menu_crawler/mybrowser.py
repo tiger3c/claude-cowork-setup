@@ -56,7 +56,9 @@ def start(url, port=None, headless=False):
     args = [exe, f"--remote-debugging-port={port}", f"--user-data-dir={PROFILE}", "--no-first-run",
             "--no-default-browser-check", "--disable-features=Translate,TranslateUI", url]
     if headless:
-        args[1:1] = ["--headless=new", "--no-sandbox"]
+        args[1:1] = ["--headless=new"]
+    if os.name != "nt" and hasattr(os, "geteuid") and os.geteuid() == 0:
+        args[1:1] = ["--no-sandbox"]            # Chromium refuses to start as root otherwise (Linux test machines)
     flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags)
     for _ in range(60):

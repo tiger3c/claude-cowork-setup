@@ -41,7 +41,10 @@ HIDE_POPUPS = """() => {
   return n;
 }"""
 SAME_PAGE_VISITS = 3
-SESSION_LOST_AFTER = 3   # login screens in a row after logging in     # visits of one page whose links differ only in a token / timestamp
+SESSION_LOST_AFTER = 3   # login screens in a row after logging in
+# POSTs while crawling are blocked when they look like an action (reads such as select*.do / search go through)
+ACTION_URL = re.compile(r"(transfer|withdraw|delete|remove|logout|logoff|signout|cancel|payment|submit|save|update|insert|"
+                        r"regist|apply|execute|confirm|modify|approve|/(?:del|upd|ins|mod|sav|trn)[a-z_]*\.(?:do|json|ajax|jsp))", re.I)     # visits of one page whose links differ only in a token / timestamp
 
 class Crawler:
     """Owned by one thread, including every Playwright call."""
@@ -58,6 +61,8 @@ class Crawler:
         self.scheduled: set[str] = set()
         self.shapes: dict[str, int] = {}
         self.closing_popups = False
+        self.guarding = False
+        self.own_pages = []
         self.issue_keys: set[tuple] = set()
         self.phase = "after" if config.mode == "login" else "before"
         self.pw = self.browser = self.context = self.page = None
@@ -126,7 +131,7 @@ class Crawler:
         self.context = self.browser.new_context(accept_downloads=False, ignore_https_errors=True, locale="ko-KR",
                                                 viewport={"width": 1440, "height": 1000})
         self.context.on("page", self.on_page)
-        self.page = self.context.new_page()
+        self.page = self.new_tab()
         self.page.set_default_timeout(self.config.timeout_ms)
         first = self.config.login_url if self.config.mode == "login" and self.config.login_url else self.config.url
         try:
@@ -139,31 +144,70 @@ class Crawler:
             "compare": "1단계: 로그인하지 않은 상태로 공개 메뉴를 먼저 수집합니다.",
         }[self.config.mode])
 
+    def mine(self):
+        return [p for p in getattr(self, "own_pages", []) + [self.page] if p is not None]
+
+    def new_tab(self):
+        """A tab of the crawler's own (never closed as a popup, guarded while crawling)."""
+        self.creating = True
+        try:
+            page = self.context.new_page()
+        finally:
+            self.creating = False
+        self.adopt(page)
+        return page
+
+    def adopt(self, page):
+        if page not in getattr(self, "own_pages", []):
+            self.own_pages = getattr(self, "own_pages", []) + [page]
+            page.on("dialog", lambda dialog: dialog.dismiss())
+            page.route("**/*", self.guard)
+
+    def guard(self, route, request):
+        """While crawling, never let a click or a page send a request that may change state:
+        form submissions (POST documents) and POSTs to action-like addresses are blocked; reads go through.
+        The login step is not guarded (the user logs in)."""
+        if not self.guarding or request.method in {"GET", "HEAD", "OPTIONS"}:
+            return route.continue_()
+        if request.resource_type == "document" or ACTION_URL.search(request.url):
+            self.issue("요청 차단", public_url(request.url), f"상태를 바꿀 수 있는 {request.method} 요청이라 보내지 않았습니다.")
+            return route.abort()
+        return route.continue_()
+
     def on_page(self, page):
-        page.on("dialog", lambda dialog: dialog.dismiss())
-        # While crawling, windows the site opens by itself (notices, events) are closed. During the login step
-        # they stay open: certificate / 2FA windows are part of logging in.
-        if self.closing_popups and page is not self.page:
-            try:
-                opener = page.opener()
-            except BrowserError:
-                opener = None
-            mine = getattr(self, "own_pages", [self.page]) + [self.page]
-            if opener is None and getattr(self, "attached", False):
-                return                       # a tab the user opened in their own browser: leave it
-            if opener is None or opener in mine:
+        if getattr(self, "creating", False):
+            return                                   # our own new tab: adopted by new_tab()
+        try:
+            opener = page.opener()
+        except BrowserError:
+            opener = None
+        if opener is not None and opener in self.mine():
+            self.adopt(page)                         # opened by our tab: our window, guarded and closed after use
+            if self.closing_popups:
                 try:
                     page.close()
                 except BrowserError:
                     pass
+            return
+        if getattr(self, "attached", False):
+            page.on("dialog", lambda dialog: None)  # the user's own tab: leave its dialogs to the user
+            return
+        page.on("dialog", lambda dialog: dialog.dismiss())
+        # Crawler window: a window the site opens by itself (notices, events) is closed while crawling. During the
+        # login step it stays open: certificate / 2FA windows are part of logging in.
+        if self.closing_popups and opener is None:
+            try:
+                page.close()
+            except BrowserError:
+                pass
 
-    def page_functions(self, page, prefixes):
+    def page_functions(self, page, prefixes, skip=()):
         """Tabs / choices inside an opened page become the next depth of the menu that opened it."""
         prefixes = [p for p in prefixes if 1 <= len(p) < 3]
         if not prefixes:
             return
         try:
-            labels = page.main_frame.evaluate(PAGE_FUNCTIONS)
+            labels = [x for x in page.main_frame.evaluate(PAGE_FUNCTIONS) if x not in skip]
         except BrowserError:
             return
         source = canonical_url(page.url)
@@ -198,7 +242,7 @@ class Crawler:
         return ""
 
     def click_menu(self, menu):
-        page = self.page if not self.page.is_closed() else self.context.new_page()
+        page = self.page if not self.page.is_closed() else self.new_tab()
         self.page = page
         if canonical_url(page.url) != menu.source_url:
             page.goto(menu.source_url, wait_until="domcontentloaded", timeout=self.config.timeout_ms)
@@ -210,19 +254,36 @@ class Crawler:
         if hit is None:
             menu.reason = "메뉴를 다시 찾지 못해 눌러 보지 못했습니다."
             return
+        if hit.get("unsafe"):
+            menu.reason = "상태를 바꿀 수 있는 메뉴(로그아웃·삭제·제출 등)로 보여 누르지 않았습니다."
+            return
+        try:
+            tabs_before = set(page.main_frame.evaluate(PAGE_FUNCTIONS))
+        except BrowserError:
+            tabs_before = set()
         before, start = list(self.context.pages), canonical_url(page.url)
         self.closing_popups = False                  # a window this click opens is the menu's screen
+        clicked = False
         try:
             try:
-                # never a submit button (a <button> inside a form submits by default)
-                page.evaluate("""id => { const el = document.querySelector('[data-mc-id="' + id + '"]');
-                    if (el && el.type !== 'submit') el.click(); }""", hit["mc"])
+                # only the element read just now, with the same name, and never a submit button
+                clicked = page.evaluate("""([id, label]) => {
+                    const el = document.querySelector('[data-mc-id="' + id + '"]');
+                    if (!el || el.type === 'submit' || el.closest('form') && el.tagName !== 'A') return false;
+                    const text = s => String(s || '').replace(/\\s+/g, ' ').trim();
+                    const names = [el.getAttribute('aria-label'), el.getAttribute('title'), el.textContent, el.value].map(text);
+                    if (!names.includes(label)) return false;
+                    el.click();
+                    return true; }""", [hit["mc"], hit["label"]])
             except BrowserError:
-                pass                                   # the click navigated away: that is the expected case
+                clicked = True                         # the click navigated away: that is the expected case
             page.wait_for_timeout(max(self.config.wait_ms, 800))
         finally:
             self.closing_popups = True
-        opened = [p for p in self.context.pages if p not in before and not p.is_closed()]
+        if not clicked:
+            menu.reason = "화면이 바뀌어 같은 메뉴를 찾지 못해 누르지 않았습니다."
+            return
+        opened = [p for p in self.context.pages if p not in before and not p.is_closed() and p in self.mine()]
         target = opened[0] if opened else page
         try:
             target.wait_for_load_state("domcontentloaded", timeout=self.config.timeout_ms)
@@ -241,7 +302,7 @@ class Crawler:
             self.page_functions(target, [menu.path])
         else:                                         # same page: a panel or tab opened in place
             menu.status, menu.reason = "수집됨", "메뉴를 눌러 같은 화면 안의 내용을 확인했습니다."
-            self.page_functions(target, [menu.path])
+            self.page_functions(target, [menu.path], skip=tabs_before)   # only tabs that this click brought
         for p in opened:
             try:
                 p.close()
@@ -275,8 +336,9 @@ class Crawler:
         self.attached = True
         self.context = self.browser.contexts[0] if self.browser.contexts else self.browser.new_context()
         self.context.on("page", self.on_page)
-        self.page = self.context.new_page()
-        self.own_pages = [self.page]
+        for page in self.context.pages:              # the user's tabs: their dialogs stay with the user
+            page.on("dialog", lambda dialog: None)
+        self.page = self.new_tab()
         self.page.set_default_timeout(self.config.timeout_ms)
         first = self.config.login_url if self.config.mode == "login" and self.config.login_url else self.config.url
         try:
@@ -441,7 +503,7 @@ class Crawler:
         if phase:
             self.phase = phase
         count = 0
-        for page in list(self.context.pages):
+        for page in (self.mine() if getattr(self, "attached", False) else list(self.context.pages)):
             if page.is_closed():
                 continue
             url = canonical_url(page.url)
@@ -458,7 +520,7 @@ class Crawler:
         """Bring the login screen to the front of the collection browser."""
         try:
             if self.page.is_closed():
-                self.page = self.context.new_page()
+                self.page = self.new_tab()
             self.page.goto(url, wait_until="domcontentloaded", timeout=self.config.timeout_ms)
             self.page.bring_to_front()
             self.emit(None, "로그인 화면을 열었습니다. 브라우저 창에서 로그인을 마친 뒤 로그인 후 수집을 시작하세요.")
@@ -471,7 +533,10 @@ class Crawler:
 
         Values are used once and never stored in the report, logs or exports.
         """
-        for page in reversed([p for p in self.context.pages if not p.is_closed()]):
+        pages = [p for p in self.mine() + list(reversed(self.context.pages)) if not p.is_closed()]
+        for page in dict.fromkeys(pages):
+            if urlsplit(canonical_url(page.url)).netloc.lower() not in self.hosts:
+                continue                              # never type the target's account into another site's tab
             for frame in page.frames:
                 try:
                     fields = frame.locator('input[type="password"]:visible')
@@ -526,11 +591,11 @@ class Crawler:
         return False
 
     def crawl(self, phase=None, resume=False):
-        self.closing_popups = True
+        self.closing_popups = self.guarding = True
         try:
             return self._crawl(phase, resume)
         finally:
-            self.closing_popups = False
+            self.closing_popups = self.guarding = False
 
     def _crawl(self, phase=None, resume=False):
         if phase:
@@ -565,7 +630,7 @@ class Crawler:
                 item.status, item.reason = visit_policy(item.url, self.hosts)
                 self.enqueue(item.url, 0)
         self.enqueue(self.config.url, 0)
-        for page in list(self.context.pages):
+        for page in (self.mine() if getattr(self, "attached", False) else list(self.context.pages)):
             if not page.is_closed():
                 self.harvest(page, 0, manual=True)
                 self.enqueue(canonical_url(page.url), 0)
@@ -608,7 +673,7 @@ class Crawler:
             result = {"url": url, "final_url": "", "title": "", "http_status": None, "status": "수집됨", "reason": "", "phase": label}
             try:
                 if self.page.is_closed():
-                    self.page = self.context.new_page()
+                    self.page = self.new_tab()
                 response = self.page.goto(url, wait_until="domcontentloaded", timeout=self.config.timeout_ms)
                 self.page.wait_for_timeout(self.config.wait_ms)
                 result.update(final_url=canonical_url(self.page.url), http_status=response.status if response else None)
@@ -641,7 +706,9 @@ class Crawler:
             if result["status"] != "수집됨":
                 self.issue(result["status"], url, result["reason"])
             # After login, three login screens in a row: the session ended (timeout, logged out elsewhere).
-            streak = streak + 1 if self.phase == "after" and result["status"] in {"로그인 필요", "로그인·권한 확인"} else 0
+            wall = result["status"] in {"로그인 필요", "로그인·권한 확인"} or (
+                result["status"] == "범위 밖 이동" and AUTH.search(result.get("final_url") or ""))
+            streak = streak + 1 if self.phase == "after" and wall else 0
             self.lost_urls = (getattr(self, "lost_urls", []) + [(url, hops)])[-streak:] if streak else []
             if streak >= SESSION_LOST_AFTER:
                 self.report.session_lost = True

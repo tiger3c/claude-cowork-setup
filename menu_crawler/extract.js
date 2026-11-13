@@ -38,6 +38,21 @@
   }
   const records = [];
   let unnamed = 0, seq = 0;
+  for (const root of roots) root.querySelectorAll("[data-mc-id]").forEach(e => e.removeAttribute("data-mc-id"));   // ids of an earlier read are stale
+  // Never click what may change state: inside a form, submit buttons, action words in text / title / aria-label,
+  // or script code that submits, posts or logs out.
+  // hard words are never clicked; soft words only when the name is not a browsing menu (결제내역조회, Payment guide ...)
+  const hardWords = /(로그아웃|로그\s*오프|탈퇴|삭제|해지|logout|log\s*out|log\s*off|sign\s*out|withdraw|delete|remove)/i;
+  const softWords = /(취소|종료|실행|전송|송금|결제|저장|확인|승인|cancel|exit|submit|send|pay|save|confirm|approve|execute)/i;
+  const browseWords = /(조회|내역|안내|목록|현황|가이드|소개|정보|센터|서비스|관리|guide|history|inquiry|list|view|status|info|center|service|rate|notice)/i;
+  const actionCode = /(submit\s*\(|requestSubmit|fetch\s*\(|XMLHttpRequest|\$\.(?:post|ajax)|axios|\.post\s*\(|logout|logoff|signout|delete|remove|withdraw|transfer|cancel|\bpay|\bsave|\bsend|insert|update|regist|exec)/i;
+  const unsafe = el => {
+    if (el.closest("form") || el.matches('[type="submit"],[type="image"],[type="reset"]')) return true;
+    const words = [el.textContent, el.getAttribute("title"), el.getAttribute("aria-label"), el.value].filter(Boolean).join(" ");
+    const code = (el.getAttribute("onclick") || "") + " " + (el.getAttribute("href") || "");
+    return hardWords.test(words) || (softWords.test(words) && !browseWords.test(words))
+      || (/javascript:|\(/i.test(code) && actionCode.test(code));
+  };
   for (const root of roots) {
     // Validate the optional selector even on a page with no links.
     root.querySelectorAll(navSelector);
@@ -95,7 +110,8 @@
       const evidence = nav ? "메뉴 DOM" : common ? "공통 링크" : breadcrumbs.length ? "본문 링크·현재 경로" : "일반 링크";
       const mc = String(seq++);
       el.setAttribute("data-mc-id", mc);
-      records.push({ path, url, label, kind: !url && children ? "group" : !url ? "dynamic" : "link", evidence, hierarchy_review: !nav, mc });
+      records.push({ path, url, label, kind: !url && children ? "group" : !url ? "dynamic" : "link", evidence, hierarchy_review: !nav, mc,
+                     unsafe: unsafe(el) });
     }
   }
   // A login form, not just any password field (an account PIN on a transfer page is not a login screen):
@@ -128,7 +144,9 @@
       try { if (raw && !/^(javascript:|#)/i.test(raw)) { const u = new URL(raw, document.baseURI); if (/^https?:$/.test(u.protocol)) url = u.href; } } catch {}
       const mc = String(seq++);
       el.setAttribute("data-mc-id", mc);
-      records.push({ path: [top, label], url, label, kind: url ? "link" : "dynamic", evidence: "로그인 화면", hierarchy_review: false, mc });
+      // login-box links that submit the form or post are not opened (only plain links / navigation scripts)
+      records.push({ path: [top, label], url, label, kind: url ? "link" : "dynamic", evidence: "로그인 화면", hierarchy_review: false, mc,
+                     unsafe: unsafe(el) && !(el.closest("form") && !/submit|fetch|post|ajax/i.test((el.getAttribute("onclick") || "") + (el.getAttribute("href") || "")) && el.matches("a")) });
     }
   }
   return {

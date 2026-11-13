@@ -489,3 +489,61 @@ def test_account_pin_field_is_not_a_login_screen():
         assert not any(m["evidence"] == "로그인 화면" for m in report["menus"])
     finally:
         server.shutdown()
+
+
+TRAPS = """<!doctype html><html><head><script>
+function go(p){ location.href = p; }
+function doLogout(){ fetch('/hit/logout', {method:'POST'}); }
+function runTransfer(){ fetch('/api/transfer', {method:'POST', body:'amount=1000000'}); }
+function post(p){ fetch(p, {method:'POST'}); }
+</script></head><body><nav><ul>
+ <li><a href="javascript:go('/notice')">공지사항</a></li>
+ <li><a href="javascript:go('/rates')">Exchange rate</a></li>
+ <li><a href="javascript:runTransfer()">이체 실행</a></li>
+ <li><a href="javascript:post('/hit/submit-en')">Submit transfer</a></li>
+ <li><a href="javascript:doLogout()">마이페이지</a></li>
+ <li><a href="javascript:post('/hit/withdraw')" title="내 정보">회원탈퇴</a></li>
+ <li><a href="javascript:post('/hit/save')">Save changes</a></li>
+ <li><form action="/api/form-submit" method="post"><input type=hidden name=amount value=1000000>
+     <button type=button onclick="this.form.submit()">자동 처리</button></form></li>
+ <li><span role=menuitem onclick="document.forms[0].requestSubmit()">빠른 처리</span></li>
+</ul></nav></body></html>"""
+
+
+def test_crawler_never_triggers_state_changing_requests():
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from menu_crawler.crawler import Crawler
+    from menu_crawler.models import CrawlConfig
+    seen = []
+
+    class Traps(BaseHTTPRequestHandler):
+        def respond(self):
+            seen.append((self.command, self.path.split("?")[0]))
+            body = TRAPS if self.path == "/" else "<html><body><ul class='tab'><li><a href='#a'>탭A</a></li></ul></body></html>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(body.encode())
+
+        do_GET = do_POST = respond
+
+        def log_message(self, *a):
+            pass
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Traps)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        engine = Crawler(CrawlConfig(url=f"http://127.0.0.1:{server.server_address[1]}/", headless=True,
+                                     browser="chromium", wait_ms=0, delay_ms=0))
+        engine.open()
+        try:
+            engine.crawl("before")
+            report = engine.snapshot()
+        finally:
+            engine.close()
+        posts = [p for m, p in seen if m != "GET"]
+        assert posts == [], posts                                              # nothing state-changing was sent
+        clicked = {tuple(m["path"]) for m in report["menus"] if "눌러" in (m.get("reason") or "") and m["status"] == "수집됨"}
+        assert ("공지사항",) in clicked and ("Exchange rate",) in clicked        # navigation menus were opened
+    finally:
+        server.shutdown()

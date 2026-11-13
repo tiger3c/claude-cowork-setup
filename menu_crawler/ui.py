@@ -189,10 +189,22 @@ def ask(prompt, default=""):
     return value or default
 
 
+YES = {"y", "yes", "ㅛ", "예", "네", "넹", "응", "ㅇ", "ㅇㅇ", "ok", "오케이", "좋아"}
+NO = {"n", "no", "ㅜ", "아니", "아니요", "아니오", "ㄴ", "ㄴㄴ", "노"}
+
+
 def ask_yes(prompt, default=False):
+    """Y/N with Korean answers too ('네', or 'y' typed while the Korean keyboard is on = 'ㅛ'); asks again on anything else."""
     mark = "Y/n" if default else "y/N"
-    value = ask(f"{prompt} ({mark})").lower()
-    return default if not value else value in {"y", "yes", "예", "ㅇ"}
+    while True:
+        value = ask(f"{prompt} ({mark})").strip().lower()
+        if not value:
+            return default
+        if value in YES:
+            return True
+        if value in NO:
+            return False
+        print("  y(예) 또는 n(아니요)로 답하세요.")
 
 
 def ask_int(prompt, default, low, high):

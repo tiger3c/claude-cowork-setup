@@ -17,7 +17,12 @@ CONFIG = Path(__file__).resolve().parent.parent / "google_sheet.json"
 
 
 class SheetError(Exception):
-    pass
+    """transport=True: the web app could not be reached or answered with HTTP/HTML (network, deployment),
+    so nothing is known about the sheet itself; False: the web app answered (e.g. no access to that sheet)."""
+
+    def __init__(self, message, transport=False):
+        super().__init__(message)
+        self.transport = transport
 
 
 def _env():
@@ -59,7 +64,9 @@ def save_config(url, token, name=""):
 def remove_connection(index):
     keep = file_connections()
     if 0 <= index < len(keep):
-        keep.pop(index)
+        gone = keep.pop(index)
+        from . import state
+        state.forget_connection(gone["url"])          # sheets bound to it must be chosen again
         CONFIG.write_text(json.dumps({"connections": keep}, ensure_ascii=False, indent=1), encoding="utf-8")
     return keep
 
@@ -93,14 +100,15 @@ class Client:
             with urllib.request.urlopen(req, timeout=self.timeout) as res:
                 text = res.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as exc:
-            raise SheetError(f"구글 시트 연결 실패 (HTTP {exc.code}). 웹 앱 배포의 액세스 권한이 '모든 사용자'인지 확인하세요.") from exc
+            raise SheetError(f"구글 시트 연결 실패 (HTTP {exc.code}). 웹 앱 배포의 액세스 권한이 '모든 사용자'인지 확인하세요.",
+                             transport=True) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise SheetError(f"구글 시트에 연결할 수 없습니다: {getattr(exc, 'reason', exc)}") from exc
+            raise SheetError(f"구글 시트에 연결할 수 없습니다(네트워크): {getattr(exc, 'reason', exc)}", transport=True) from exc
         try:
             data = json.loads(text)
         except ValueError as exc:
             hint = "로그인 화면이 돌아왔습니다. 웹 앱 액세스 권한을 '모든 사용자'로 배포하세요." if "<html" in text[:500].lower() else text[:120]
-            raise SheetError(f"구글 시트 응답을 읽을 수 없습니다. {hint}") from exc
+            raise SheetError(f"구글 시트 응답을 읽을 수 없습니다. {hint}", transport=True) from exc
         if not data.get("ok"):
             raise SheetError(data.get("error") or "구글 시트에서 오류가 발생했습니다.")
         return data

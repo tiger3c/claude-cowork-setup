@@ -79,3 +79,15 @@ def remember(key, value):
         FILE.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
     except OSError:
         pass
+
+
+def forget_connection(connection_url):
+    if os.environ.get("MENU_CRAWLER_NO_STATE"):
+        return
+    try:
+        data = _load()
+        links = data.get("sheet_connections", {})
+        data["sheet_connections"] = {k: v for k, v in links.items() if v != connection_url}
+        FILE.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    except OSError:
+        pass

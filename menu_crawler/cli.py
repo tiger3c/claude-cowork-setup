@@ -239,8 +239,8 @@ def run_command(job, name, **args):
     return job.wait_done(job.command(name, **args))
 
 
-def crawl(job, phase):
-    job.command("crawl", phase=phase)
+def crawl(job, phase, resume=False):
+    job.command("crawl", phase=phase, resume=resume)
     data = wait(job)
     print("  " + data["message"])
     if data.get("login_check"):
@@ -566,19 +566,21 @@ def pick_connection(ref, interactive):
     """The one connection (Google account) used for this sheet: remembered per sheet, asked the first time.
     Other accounts are never tried on a sheet, so a sheet is only written through the account chosen for it."""
     conns = all_connections()
-    if len(conns) == 1:
-        return conns[0]
     remembered = state.sheet_connection(ref)
     hit = next((c for c in conns if c["url"] == remembered), None)
     if hit:
         return hit
+    if len(conns) == 1 and not remembered:
+        return conns[0]
     if not interactive:
         sys.exit("이 시트에 쓸 구글 연결을 정하지 않았습니다. 한 번 대화형으로 실행해 연결을 고르세요.")
+    if remembered:
+        ui.note("이 시트를 쓰던 연결이 더 이상 없습니다(삭제됨). 이 시트에 쓸 연결을 다시 고르세요.")
     print("  이 시트에 쓸 구글 연결(계정)을 고르세요. " + ui.dim("고른 연결로만 이 시트에 씁니다. 다음부터는 묻지 않습니다."))
     for i, conn in enumerate(conns, 1):
         print(f"    {i}) {conn.get('name', '') or f'연결 {i}'}")
     while True:
-        pick = ask("  번호", "1")
+        pick = ask("  번호")
         if pick.isdigit() and 1 <= int(pick) <= len(conns):
             state.remember_sheet_connection(ref, conns[int(pick) - 1]["url"])
             return conns[int(pick) - 1]
@@ -594,8 +596,10 @@ def open_sheet(client, ref, interactive):
         board.cached = board.targets()
     except SheetError as exc:
         ui.fail(f"{client.name or '연결'}: {exc}")
-        ui.note("이 연결의 계정이 이 시트를 편집할 수 없습니다. 다른 연결로 쓰려면 run.bat --connect-google 에서 연결을 정리하세요.")
-        state.remember_sheet_connection(ref, "")
+        if exc.transport:      # network / deployment trouble: says nothing about the sheet, keep its connection
+            ui.note("네트워크나 웹 앱 배포 문제입니다. 연결은 그대로 두었습니다. 잠시 후 다시 실행하세요.")
+            sys.exit(1)
+        ui.note("이 연결의 계정으로는 이 시트를 열 수 없습니다. 시트 주소와 그 계정의 편집 권한을 확인하세요.")
         return None
     return board
 
@@ -621,7 +625,9 @@ def choose_board(args, interactive):
             linked = bool(all_connections())
             last = "" if linked else state.last_workbook()
             if linked:
-                print("  " + ui.bold("구글 시트 주소 붙여넣기 또는 Enter(지난번 시트)") + ui.dim("  = 구글 시트에 바로 입력, 값만 입력"))
+                last_sheet, last_title = state.last_sheet()
+                print("  " + ui.bold("구글 시트 주소 붙여넣기" + (f" 또는 Enter(지난번 시트 '{last_title or '진단표'}')" if last_sheet else " 또는 Enter"))
+                      + ui.dim("  = 구글 시트에 바로 입력, 값만 입력"))
                 print("  " + ui.dim("엑셀 파일로 하려면 파일을 끌어다 놓기 | p = 구글 시트 붙여넣기 | - = 기입 없이 수집만 | c = 정리 점검"))
             else:
                 print("  작업할 진단 엑셀 파일을 붙여넣어 주세요. (파일을 이 창에 끌어다 놓아도 됩니다)")
@@ -671,7 +677,10 @@ def choose_board(args, interactive):
                     sys.exit("--sheet-url 로 진단표 구글 시트 주소를 지정하세요.")
                 break
             hint = f" (Enter = 지난번 시트 '{last_title or last}')" if last else ""
-            raw = ask(f"  진단표 구글 시트 주소{hint}")
+            raw = ask(f"  진단표 구글 시트 주소{hint} (- = 처음 질문으로)")
+            if raw.strip() == "-":
+                args.target, args.sheet_url = None, ""
+                return choose_board(args, interactive)
             ref = gsheet.sheet_ref(raw) if raw else last
             if not ref:
                 print("  구글 시트 주소를 붙여넣으세요. 예: https://docs.google.com/spreadsheets/d/.../edit")
@@ -679,7 +688,6 @@ def choose_board(args, interactive):
         if board is None:
             if interactive:
                 args.sheet_url = ""
-                state.remember_sheet("", "")
                 return choose_board(args, interactive)
             sys.exit("구글 시트를 열 수 없습니다.")
         state.remember_sheet(ref, board.title)
@@ -950,6 +958,7 @@ def run_crawl(config, args, auto=False):
                     print("\n  [로그인 없이] 공개 메뉴 수집")
                     data = crawl(job, "before")
             elif step:
+                ui.window_title("로그인 후 수집 중")
                 print("\n  [로그인 후] 메뉴 수집")
                 data = crawl(job, "after")
                 for _ in range(3):              # the session ended on the way: log in again and go on
@@ -961,8 +970,9 @@ def run_crawl(config, args, auto=False):
                         break
                     if login_step(job, config, args.username) is not True:
                         break
-                    print("\n  [로그인 후] 메뉴 이어서 수집")
-                    data = crawl(job, "after")
+                    ui.window_title("로그인 후 수집 중")
+                    print("\n  [로그인 후] 남은 페이지부터 이어서 수집")
+                    data = crawl(job, "after", resume=True)
             else:
                 data = job.snapshot()
         return data, (KeyboardInterrupt() if job.stop.is_set() else None)
@@ -1048,21 +1058,44 @@ def campaign(args):
         sys.exit("취소했습니다.")
 
     done, stop = run_plan(plan, items, mode, settings, board, args)
-    retry = [(f.target, url, login) for (f, _, _, url), (_, _, login) in zip(done, plan) if f.status in RETRY]
+    retry = [(row, entry) for row, entry in zip(done, plan) if row[0].status in RETRY]
     report(done, board, mode, args, stop, offer_open=not retry or stop is not None)
     while retry and stop is None:
         print()
-        names = ", ".join(t.sheet or "진단 시트" for t, _, _ in retry)
-        if not ask_yes(f"  실패·건너뛴 대상 {len(retry)}개({names[:80]})를 지금 다시 시도할까요?", False):
+        names = ", ".join(row[0].target.sheet or "진단 시트" for row, _ in retry)
+        if not ask_yes(f"  끝나지 않은 대상 {len(retry)}개(실패·건너뜀·실행 안 함·일부 입력: {names[:70]})를 지금 다시 시도할까요?", False):
             break
-        done, stop = run_plan(retry, items, mode, settings, board, args)
+        # crawled fine but not filled (sheet error, 'no' at the fill question): fill again from the saved menu list
+        refill = [(row, entry) for row, entry in retry if row[0].status in REFILL and row[2] and Path(row[2]).is_file()]
+        recrawl = [entry for row, entry in retry if (row, entry) not in refill]
+        done = [refill_row(row, board, args) for row, _ in refill]
+        if recrawl:
+            more, stop = run_plan(recrawl, items, mode, settings, board, args)
+            done += more
         report(done, board, mode, args, stop)
-        retry = [(f.target, url, login) for (f, _, _, url), (_, _, login) in zip(done, retry) if f.status in RETRY]
+        entries = [entry for _, entry in refill] + recrawl
+        retry = [(row, entry) for row, entry in zip(done, entries) if row[0].status in RETRY]
     if isinstance(stop, SystemExit):
         raise stop
 
 
-RETRY = {"수집 실패", "실패", "중단", "건너뜀", "실행 안 함", "기입할 메뉴 없음", "기입 안 함"}
+RETRY = {"수집 실패", "실패", "중단", "건너뜀", "실행 안 함", "기입할 메뉴 없음", "기입 안 함", "일부 입력", "수집 미완료"}
+
+
+REFILL = {"실패", "기입 안 함", "건너뜀"}
+
+
+def refill_row(row, board, args):
+    """Fill again from the menu-list Excel saved by the crawl (no new crawl, no new login)."""
+    filled, _, path, url = row
+    t = filled.target
+    ui.header(f"다시 기입: {t.sheet}", Path(path).name)
+    try:
+        menus = choose_menus(diag.menus_from_result(path), diag.unverified_from_result(path), args, True)
+        return board.fill(t, menus, True, Path(path).parent), len(menus), path, url
+    except (ValueError, OSError, SheetError) as exc:
+        ui.fail(f"{t.sheet}: {exc}")
+        return Filled(t, "실패"), 0, path, url
 
 
 def run_plan(plan, items, mode, settings, board, args):
@@ -1450,19 +1483,23 @@ def run_target(i, total, t, url, login_url, mode, settings, board, args):
     if not data["menus"]:
         why = next((p.get("reason") or p.get("status") for p in data.get("pages", []) if p.get("status") != "수집됨"), "")
         ui.fail("메뉴를 수집하지 못해 기입하지 않았습니다." + (f" 사유: {why}" if why else " 주소와 접속(VPN, 사내망)을 확인하세요."))
-        return Filled(t, "수집 실패"), 0, path.name, url
+        return Filled(t, "수집 실패"), 0, str(path), url
     confirmed, unverified = diag.menus_from_report(data, include_unverified=True)
     menus = choose_menus(confirmed, unverified, args, True)
     if not menus:
         counts = ", ".join(f"{k} {n}" for k, n in Counter(m["status"] for m in data["menus"]).most_common(4))
         ui.fail(f"진단 시트에 넣을 메뉴가 없어 기입하지 않았습니다. (발견 {len(data['menus'])}개: {counts})")
         ui.say(ui.dim("메뉴가 표준 형태가 아니면 고급 설정의 '메뉴 영역 CSS 선택자'나 로그인 단계의 c(현재 화면 추가)를 사용하세요."))
-        return Filled(t, "기입할 메뉴 없음"), 0, path.name, url
+        return Filled(t, "기입할 메뉴 없음"), 0, str(path), url
     if error is not None and not ask_yes(f"  수집을 중간에 멈췄습니다. 멈춘 시점까지의 메뉴 {len(menus)}개를 진단 시트에 기입할까요?", True):
-        return Filled(t, "기입 안 함"), len(menus), path.name, url
+        return Filled(t, "기입 안 함"), len(menus), str(path), url
     print()
     print("  " + ui.bold(f"> 진단 시트 기입: {t.sheet or '진단 시트'}"))
-    return board.fill(t, menus, True, path.parent), len(menus), path.name, url
+    filled = board.fill(t, menus, True, path.parent)
+    if (data.get("session_lost") or data.get("limit_reached")) and filled.status in {"입력 완료", "새 메뉴 없음"}:
+        filled.status = "일부 입력" if filled.status == "입력 완료" else "수집 미완료"
+        ui.note("수집이 끝까지 가지 못한 대상이라 결과 표에 '" + filled.status + "'로 남기고, 다시 시도 목록에 넣습니다.")
+    return filled, len(menus), str(path), url
 
 
 def main(argv=None):

@@ -525,17 +525,19 @@ class Crawler:
                 continue
         return False
 
-    def crawl(self, phase=None):
+    def crawl(self, phase=None, resume=False):
         self.closing_popups = True
         try:
-            return self._crawl(phase)
+            return self._crawl(phase, resume)
         finally:
             self.closing_popups = False
 
-    def _crawl(self, phase=None):
+    def _crawl(self, phase=None, resume=False):
         if phase:
             self.phase = phase
         self.stop.clear()
+        if resume and getattr(self, "lost_urls", None):
+            return self._resume()
         # A re-crawl replaces the warnings of the same phase; earlier phases stay as history.
         label = PHASES[self.phase]
         self.report.issues = [x for x in self.report.issues if x.get("phase") != label]
@@ -567,6 +569,25 @@ class Crawler:
             if not page.is_closed():
                 self.harvest(page, 0, manual=True)
                 self.enqueue(canonical_url(page.url), 0)
+        return self._run_queue()
+
+    def _resume(self):
+        """After logging in again: re-open the pages that showed the login screen, then go on with the queue."""
+        lost, self.lost_urls = self.lost_urls, []
+        label = PHASES[self.phase]
+        urls = {u for u, _ in lost}
+        self.report.pages = [p for p in self.report.pages if not (p.get("phase") == label and p.get("url") in urls)]
+        self.report.visited_count = max(0, self.report.visited_count - len(urls))
+        self.report.limit_reached = False
+        self.report.issues = [x for x in self.report.issues if not (x.get("phase") == label and x.get("kind") == "수집 미완료")]
+        for url, hops in reversed(lost):
+            self.results.pop(url, None)
+            self.pending.appendleft((url, hops))
+        self.emit("crawling", f"{label} 상태로 남은 페이지를 이어서 확인합니다.")
+        return self._run_queue()
+
+    def _run_queue(self):
+        label = PHASES[self.phase]
         deadline = time.monotonic() + self.config.max_seconds if self.config.max_seconds else None
         end_reason = ""
         streak = 0
@@ -621,6 +642,7 @@ class Crawler:
                 self.issue(result["status"], url, result["reason"])
             # After login, three login screens in a row: the session ended (timeout, logged out elsewhere).
             streak = streak + 1 if self.phase == "after" and result["status"] in {"로그인 필요", "로그인·권한 확인"} else 0
+            self.lost_urls = (getattr(self, "lost_urls", []) + [(url, hops)])[-streak:] if streak else []
             if streak >= SESSION_LOST_AFTER:
                 self.report.session_lost = True
                 end_reason = "로그인이 풀린 것 같습니다. 연속으로 로그인 화면이 나와 수집을 멈췄습니다."
@@ -709,7 +731,7 @@ class Job:
                 if command == "close":
                     break
                 if command == "crawl":
-                    engine.crawl(args.get("phase"))
+                    engine.crawl(args.get("phase"), args.get("resume", False))
                 elif command == "capture":
                     engine.capture(args.get("phase"))
                 elif command == "goto":

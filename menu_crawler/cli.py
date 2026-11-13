@@ -610,6 +610,13 @@ def open_sheet(client, ref, interactive):
             sys.exit(1)
         ui.note("이 연결의 계정으로는 이 시트를 열 수 없습니다. 시트 주소와 그 계정의 편집 권한을 확인하세요.")
         return None
+    if client.outdated():
+        ui.note(f"배포된 Apps Script가 예전 버전입니다 (배포본 {client.version or '버전 없음'} / 최신 {gsheet.SCRIPT_VERSION}). "
+                "붙여넣고 저장만 하면 예전 코드가 계속 실행됩니다.")
+        print("  " + gsheet.UPDATE_STEPS)
+        print("  " + ui.dim("예전 버전에는 최근 안전장치(진단 시트 확인, 쓰기 직전 재확인, 정리 점검)가 없습니다."))
+        if interactive and not ask_yes("  예전 버전 그대로 계속할까요?", False):
+            sys.exit("Apps Script를 새 버전으로 배포한 뒤 다시 실행하세요.")
     return board
 
 

@@ -585,3 +585,18 @@ def test_wrong_layout_sheet_is_refused_before_crawling(tmp_path, monkeypatch, ca
         run(monkeypatch, tmp_path, [str(book), "02"])
     out = capsys.readouterr().out
     assert "기입할 수 없습니다" in out and "수집 방식을 선택하세요" not in out
+
+
+def test_outdated_apps_script_deployment_is_reported(tmp_path, monkeypatch, gas, capsys):
+    import re as _re
+    source = (Path(__file__).parent.parent / "apps_script" / "MenuImport.gs").read_text(encoding="utf-8")
+    assert int(_re.search(r"var VERSION = (\d+);", source).group(1)) == gsheet.SCRIPT_VERSION      # kept in step
+    port, _ = gas([{"name": "05_사이트", "cells": {**FORM}}])
+    client = gsheet.Client(f"http://127.0.0.1:{port}/", "k", spreadsheet=BOOK)
+    client.targets()
+    assert not client.outdated()
+    monkeypatch.setattr(gsheet, "SCRIPT_VERSION", gsheet.SCRIPT_VERSION + 1)                        # deployed copy is older
+    assert client.outdated()
+    with pytest.raises(SystemExit):                                                                  # default answer: stop
+        run(monkeypatch, tmp_path, [f"https://docs.google.com/spreadsheets/d/{BOOK}/edit", ""])
+    assert "예전 버전" in capsys.readouterr().out

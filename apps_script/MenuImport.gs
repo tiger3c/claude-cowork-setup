@@ -22,6 +22,7 @@ var MENU_ROW = 13;      // 13~15행
 var RESULT_ROW = 20;    // 20~67행
 var RESULT_COUNT = 48;
 var SITE_SHEET = /^\d{2,3}_/;
+var VERSION = 8;        // the collector warns when the deployed web app is older than its own copy of this file
 
 function setup() {
   var props = PropertiesService.getScriptProperties();
@@ -80,6 +81,7 @@ function doGet() {
 }
 
 function reply(obj) {
+  obj.version = VERSION;
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -304,6 +306,6 @@ function colName(n) {
 }
 
 if (typeof module !== 'undefined') {
-  module.exports = { planFill: planFill, cleanText: cleanText, colName: colName, FIRST_COL: FIRST_COL, LAST_COL: LAST_COL,
+  module.exports = { VERSION: VERSION, planFill: planFill, cleanText: cleanText, colName: colName, FIRST_COL: FIRST_COL, LAST_COL: LAST_COL,
                      doPost: doPost, setup: setup };
 }

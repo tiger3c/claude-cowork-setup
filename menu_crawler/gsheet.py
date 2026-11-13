@@ -15,6 +15,11 @@ from pathlib import Path
 from . import workbook as diag
 
 CONFIG = Path(__file__).resolve().parent.parent / "google_sheet.json"
+SCRIPT_VERSION = 8      # VERSION in apps_script/MenuImport.gs; an older deployed web app lacks newer safety checks
+
+
+UPDATE_STEPS = ("script.google.com 프로젝트에 apps_script/MenuImport.gs 내용을 다시 붙여넣고 저장한 뒤, "
+                "배포 -> 배포 관리 -> 수정(연필) -> 버전: 새 버전 -> 배포 하세요. (URL·연결 키는 그대로)")
 
 
 class SheetError(Exception):
@@ -111,9 +116,16 @@ class Client:
         except ValueError as exc:
             hint = "로그인 화면이 돌아왔습니다. 웹 앱 액세스 권한을 '모든 사용자'로 배포하세요." if "<html" in text[:500].lower() else text[:120]
             raise SheetError(f"구글 시트 응답을 읽을 수 없습니다. {hint}", transport=True) from exc
+        self.version = int(data.get("version") or 0) if isinstance(data, dict) else 0
         if not data.get("ok"):
-            raise SheetError(data.get("error") or "구글 시트에서 오류가 발생했습니다.")
+            error = data.get("error") or "구글 시트에서 오류가 발생했습니다."
+            if "알 수 없는 요청" in error:
+                error = "배포된 Apps Script가 예전 버전이라 이 기능이 없습니다. " + UPDATE_STEPS
+            raise SheetError(error)
         return data
+
+    def outdated(self):
+        return getattr(self, "version", 0) < SCRIPT_VERSION
 
     def ping(self):
         return self.call("ping")["title"]

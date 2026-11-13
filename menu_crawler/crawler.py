@@ -113,7 +113,8 @@ class Crawler:
         self.pw = sync_playwright().start()
         if self.config.cdp_url:
             return self.attach()
-        choices = ["msedge", "chrome", "chromium"] if self.config.browser == "auto" else [self.config.browser]
+        # auto: Chrome first, then Edge (on every Windows PC), then the bundled Chromium
+        choices = ["chrome", "msedge", "chromium"] if self.config.browser == "auto" else [self.config.browser]
         # Optional: a specific Chromium binary (offline PCs, test machines).
         custom = os.environ.get("MENU_CRAWLER_BROWSER_PATH", "")
         for channel in choices:

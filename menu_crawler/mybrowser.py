@@ -27,29 +27,32 @@ def running(port=None):
         return False
 
 
-def find_browser():
+def find_browser(prefer="auto"):
+    """Chrome first, then Edge; prefer='msedge' / 'chrome' asks for that one first."""
     custom = os.environ.get("MENU_CRAWLER_BROWSER_PATH", "")
     if custom:
         return custom
+    chrome, edge = r"Google\Chrome\Application\chrome.exe", r"Microsoft\Edge\Application\msedge.exe"
     if os.name == "nt":
-        for base in (os.environ.get("ProgramFiles(x86)", ""), os.environ.get("ProgramFiles", ""), os.environ.get("LOCALAPPDATA", "")):
-            for rel in (r"Microsoft\Edge\Application\msedge.exe", r"Google\Chrome\Application\chrome.exe"):
+        for rel in ((edge, chrome) if prefer == "msedge" else (chrome, edge)):
+            for base in (os.environ.get("ProgramFiles", ""), os.environ.get("ProgramFiles(x86)", ""), os.environ.get("LOCALAPPDATA", "")):
                 path = Path(base) / rel
                 if base and path.is_file():
                     return str(path)
-    for name in ("msedge", "microsoft-edge", "google-chrome", "chrome", "chromium"):
+    names = ("google-chrome", "chrome", "msedge", "microsoft-edge", "chromium")
+    for name in (names[2:4] + names[:2] + names[4:] if prefer == "msedge" else names):
         found = shutil.which(name)
         if found:
             return found
     return ""
 
 
-def start(url, port=None, headless=False):
+def start(url, port=None, headless=False, prefer="auto"):
     """Open (or reuse) the user's browser window and return its DevTools endpoint."""
     port = port or PORT
     if running(port):
         return endpoint(port)
-    exe = find_browser()
+    exe = find_browser(prefer)
     if not exe:
         raise RuntimeError("Edge 또는 Chrome을 찾지 못했습니다.")
     PROFILE.mkdir(exist_ok=True)

@@ -168,7 +168,7 @@ def build_config(args):
         ask_login_window(args)
     if args.my_browser:
         try:
-            settings["cdp_url"] = mybrowser.start(url, headless=args.headless)
+            settings["cdp_url"] = mybrowser.start(url, headless=args.headless, prefer=args.browser)
         except RuntimeError as exc:
             sys.exit(str(exc))
     try:
@@ -317,7 +317,7 @@ def _login_step(job, config, username, watch):
     ui.beep()
     ui.window_title("로그인이 필요합니다")
     if config.cdp_url:
-        print("  1. 내 브라우저 창(수집기가 연 Edge/Chrome)의 새 탭에서 로그인하세요. 인증서·OTP·보안 프로그램도 그 창에서 처리합니다.")
+        print("  1. 내 브라우저 창(수집기가 연 Chrome/Edge)의 새 탭에서 로그인하세요. 인증서·OTP·보안 프로그램도 그 창에서 처리합니다.")
     else:
         print("  1. 열린 브라우저 창에서 로그인하세요. 보안문자·OTP·추가 인증까지 마칩니다.")
     print("  2. 로그인된 화면이 보이면 여기서 Enter를 누르세요.")
@@ -917,7 +917,8 @@ def parse_args(argv=None):
     p.add_argument("--delay-ms", type=int, default=300)
     p.add_argument("--extra-host", action="append", default=[], help="추가 허용 호스트 (여러 번 지정 가능)")
     p.add_argument("--selector", default="", help="메뉴 영역 CSS 선택자")
-    p.add_argument("--browser", choices=["auto", "msedge", "chrome", "chromium"], default="auto")
+    p.add_argument("--browser", choices=["auto", "msedge", "chrome", "chromium"], default="auto",
+                   help="수집에 쓸 브라우저 (기본 auto: Chrome, 없으면 Edge, 없으면 내장 Chromium)")
     p.add_argument("--headless", action="store_true", help="브라우저 창 없이 실행 (로그인 전 수집만)")
     p.add_argument("--no-click", action="store_true", help="javascript: 메뉴를 눌러 보지 않음")
     p.add_argument("--allow-post-nav", action="store_true", help="메뉴가 POST로 화면을 여는 사이트: POST 화면 이동 허용 (동작 주소는 계속 차단)")
@@ -981,7 +982,7 @@ def ask_login_window(args):
     args.my_browser = ask("  번호", "2" if state.pref("my_browser") else "1") == "2"
     state.remember("my_browser", args.my_browser)
     if args.my_browser:
-        print("  " + ui.dim("Edge/Chrome을 수집기 전용 프로필(browser_profile)로 엽니다. 보안 프로그램·확장은 그 창에서 한 번만 설치하면 됩니다."))
+        print("  " + ui.dim("Chrome(없으면 Edge)을 수집기 전용 프로필(browser_profile)로 엽니다. 보안 프로그램·확장은 그 창에서 한 번만 설치하면 됩니다."))
 
 
 def engine_mode(mode):
@@ -1543,7 +1544,7 @@ def run_target(i, total, t, url, login_url, mode, settings, board, args):
     ui.header(f"[{i}/{total}] {t.name or t.sheet}", f"{t.sheet}  {url}")
     if args.my_browser:
         try:
-            settings = {**settings, "cdp_url": mybrowser.start(url, headless=args.headless)}
+            settings = {**settings, "cdp_url": mybrowser.start(url, headless=args.headless, prefer=args.browser)}
         except RuntimeError as exc:
             ui.fail(str(exc))
             return Filled(t, "실패"), 0, "", url

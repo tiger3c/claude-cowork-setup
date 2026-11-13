@@ -920,6 +920,17 @@ def run_crawl(config, args, auto=False):
             elif step:
                 print("\n  [로그인 후] 메뉴 수집")
                 data = crawl(job, "after")
+                for _ in range(3):              # the session ended on the way: log in again and go on
+                    if not data.get("session_lost") or job.stop.is_set() or args.yes:
+                        break
+                    print()
+                    ui.note("수집 중에 로그인이 풀렸습니다(연속으로 로그인 화면). 지금까지 수집한 메뉴는 남아 있습니다.")
+                    if not ask_yes("  다시 로그인하고 이어서 수집할까요?", True):
+                        break
+                    if login_step(job, config, args.username) is not True:
+                        break
+                    print("\n  [로그인 후] 메뉴 이어서 수집")
+                    data = crawl(job, "after")
             else:
                 data = job.snapshot()
         return data, (KeyboardInterrupt() if job.stop.is_set() else None)
@@ -1002,6 +1013,26 @@ def campaign(args):
     if not ask_yes("  모든 대상의 점검 권한(계약, 승인)을 확인했고, 이대로 시작할까요?", True):
         sys.exit("취소했습니다.")
 
+    done, stop = run_plan(plan, items, mode, settings, board, args)
+    retry = [(f.target, url, login) for (f, _, _, url), (_, _, login) in zip(done, plan) if f.status in RETRY]
+    report(done, board, mode, args, stop, offer_open=not retry or stop is not None)
+    while retry and stop is None:
+        print()
+        names = ", ".join(t.sheet or "진단 시트" for t, _, _ in retry)
+        if not ask_yes(f"  실패·건너뛴 대상 {len(retry)}개({names[:80]})를 지금 다시 시도할까요?", False):
+            break
+        done, stop = run_plan(retry, items, mode, settings, board, args)
+        report(done, board, mode, args, stop)
+        retry = [(f.target, url, login) for (f, _, _, url), (_, _, login) in zip(done, retry) if f.status in RETRY]
+    if isinstance(stop, SystemExit):
+        raise stop
+
+
+RETRY = {"수집 실패", "실패", "중단", "건너뜀", "실행 안 함", "기입할 메뉴 없음", "기입 안 함"}
+
+
+def run_plan(plan, items, mode, settings, board, args):
+    """Crawl and fill the planned targets in order. -> (rows for the result table, stop exception or None)."""
     done, idx, current, stop = [], 0, None, None
     try:
         while idx < len(plan):
@@ -1034,13 +1065,10 @@ def campaign(args):
             done.append((Filled(current[0], "중단"), 0, "", current[1]))
             idx += 1
     done += [(Filled(t, "실행 안 함"), 0, "", url) for t, url, _ in plan[idx:]]
-
-    report(done, board, mode, args, stop)
-    if isinstance(stop, SystemExit):
-        raise stop
+    return done, stop
 
 
-def report(done, board, mode, args, stop=None):
+def report(done, board, mode, args, stop=None, offer_open=True):
     """Result table, work log, where the filled workbook is."""
     ui.header("작업 결과", board.label)
     ui.table([("진단 시트", 26), ("수집", 5), ("기입", 17), ("중복", 5), ("위치", 13), ("점검 주소", 0)],
@@ -1060,13 +1088,13 @@ def report(done, board, mode, args, stop=None):
     if isinstance(board, ExcelBoard) and board.current != board.src:
         ui.ok("진단 엑셀 (원본은 그대로):")
         print("  " + str(board.out.resolve()))
-        if os.name == "nt" and not args.no_open and not args.yes and stop is None and ask_yes("  진단 엑셀을 열까요?", True):
+        if os.name == "nt" and offer_open and not args.no_open and not args.yes and stop is None and ask_yes("  진단 엑셀을 열까요?", True):
             os.startfile(board.out)  # noqa: S606 - Windows only, local file the user just created
     if isinstance(board, SheetsBoard):
         if any(f.status == "입력 완료" for f, _, _, _ in done):
             ui.ok(f"구글 시트 '{board.title}':")
             print("  " + board.client.spreadsheet)
-            if os.name == "nt" and not args.no_open and not args.yes and stop is None and ask_yes("  구글 시트를 브라우저로 열까요?", True):
+            if os.name == "nt" and offer_open and not args.no_open and not args.yes and stop is None and ask_yes("  구글 시트를 브라우저로 열까요?", True):
                 import webbrowser
                 webbrowser.open(board.client.spreadsheet)
         else:

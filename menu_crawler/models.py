@@ -105,6 +105,7 @@ class Report:
     visited_count: int = 0
     current_url: str = ""
     limit_reached: bool = False
+    session_lost: bool = False      # after login, page after page showed the login screen again
     phase: str = ""
     phases_done: list[str] = field(default_factory=list)
     login_check: str = ""

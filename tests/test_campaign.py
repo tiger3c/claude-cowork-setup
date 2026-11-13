@@ -333,3 +333,48 @@ def test_login_step_can_fall_back_to_public_menus(site, tmp_path, monkeypatch): 
     run(monkeypatch, tmp_path, [str(book), "02", "", "3", "1", "n", "n", "", "", "", ""])
     ws = load_workbook(next(tmp_path.glob("작업_메뉴입력_*[0-9].xlsx")))["02_빈시트"]
     assert "고객센터" in [ws.cell(13, c).value for c in range(8, 14)]
+
+
+def test_failed_targets_can_be_retried_in_the_same_run(tmp_path, monkeypatch):
+    book = book_with_domains(tmp_path / "작업.xlsx")
+    wb = load_workbook(book)
+    wb["02_빈시트"]["D6"] = "http://127.0.0.1:9/"            # nothing listens: the crawl fails
+    wb.save(book)
+    asked = run(monkeypatch, tmp_path, [str(book), "02", "", "2", "n", "", "y", "n"])
+    retries = [a for a in asked if "다시 시도할까요" in a]
+    assert len(retries) == 2                                  # offered, retried, offered again, declined
+
+
+def test_session_loss_after_login_is_detected():
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from menu_crawler.crawler import Crawler
+    from menu_crawler.models import CrawlConfig
+    login = "<form><input name=id><input type=password name=pw><button type=submit>Login</button></form>"
+    home = "<nav><ul>" + "".join(f"<li><a href='/m{i}'>메뉴{i}</a></li>" for i in range(6)) + "</ul></nav>"
+
+    class Expired(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = home if self.path == "/" else "<html><body>세션이 만료되었습니다." + login + "</body></html>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(body.encode())
+
+        def log_message(self, *a):
+            pass
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Expired)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        config = CrawlConfig(url=f"http://127.0.0.1:{server.server_address[1]}/", mode="login", headless=True,
+                             browser="chromium", wait_ms=0, delay_ms=0, click_menus=False)
+        engine = Crawler(config)
+        engine.open()
+        try:
+            engine.crawl("after")
+            report = engine.snapshot()
+        finally:
+            engine.close()
+        assert report["session_lost"] and report["visited_count"] <= 5
+    finally:
+        server.shutdown()

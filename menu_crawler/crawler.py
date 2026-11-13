@@ -40,7 +40,8 @@ HIDE_POPUPS = """() => {
   }
   return n;
 }"""
-SAME_PAGE_VISITS = 3     # visits of one page whose links differ only in a token / timestamp
+SAME_PAGE_VISITS = 3
+SESSION_LOST_AFTER = 3   # login screens in a row after logging in     # visits of one page whose links differ only in a token / timestamp
 
 class Crawler:
     """Owned by one thread, including every Playwright call."""
@@ -568,6 +569,8 @@ class Crawler:
                 self.enqueue(canonical_url(page.url), 0)
         deadline = time.monotonic() + self.config.max_seconds if self.config.max_seconds else None
         end_reason = ""
+        streak = 0
+        self.report.session_lost = False
         while self.pending:
             if self.stop.is_set():
                 end_reason = "사용자가 수집을 중지했습니다."
@@ -616,6 +619,13 @@ class Crawler:
             self.report.visited_count += 1
             if result["status"] != "수집됨":
                 self.issue(result["status"], url, result["reason"])
+            # After login, three login screens in a row: the session ended (timeout, logged out elsewhere).
+            streak = streak + 1 if self.phase == "after" and result["status"] in {"로그인 필요", "로그인·권한 확인"} else 0
+            if streak >= SESSION_LOST_AFTER:
+                self.report.session_lost = True
+                end_reason = "로그인이 풀린 것 같습니다. 연속으로 로그인 화면이 나와 수집을 멈췄습니다."
+                self.emit()
+                break
             self.emit()
             if self.config.delay_ms:
                 self.stop.wait(self.config.delay_ms / 1000)

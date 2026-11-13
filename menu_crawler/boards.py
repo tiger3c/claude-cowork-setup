@@ -87,11 +87,13 @@ class SheetsBoard:
         except SheetError as exc:
             ui.fail(str(exc))
             return Filled(target, "실패")
+        if res["overflow"]:
+            ui.note(f"빈 열이 모자라 넣지 못한 메뉴 {len(res['overflow'])}개는 입력 내역 파일에 '칸 부족'으로 남겼습니다.")
         ui.ok(f"구글 시트 ‘{target.sheet}’ {res['range']}에 {res['written']}개 입력했습니다."
               + (" 대표 도메인(D6)도 적었습니다." if res.get("domainSaved") else ""))
         if res.get("url"):
-            print("  " + ui.dim("바로 보기: " + res["url"]))
-        record = diag.Plan(target.sheet, [], res["existing"], list(zip(range(res["start"], res["start"] + res["written"]), res["write"])),
+            print("  " + ui.dim("바로 보기: ") + res["url"])
+        record = diag.Plan(target.sheet, [], res["existing"], list(zip(res.get("columns") or range(res["start"], res["start"] + res["written"]), res["write"])),
                            res["duplicates"], res["overflow"])
         rec = diag.receipt(record, Path(out_dir) / f"구글시트입력_{_safe(target.sheet)}_{datetime.now():%Y%m%d_%H%M%S}_입력내역.tsv")
         return Filled(target, "입력 완료", res["range"], res["written"], len(res["duplicates"]), len(res["overflow"]),
@@ -192,6 +194,8 @@ class ExcelBoard:
             if p.cells:
                 ui.ok("대표 도메인(D6)을 적었습니다.")
             return Filled(target, "새 메뉴 없음", duplicates=len(p.duplicates), overflow=len(p.overflow))
+        if p.overflow:
+            ui.note(f"빈 열이 모자라 넣지 못한 메뉴 {len(p.overflow)}개는 입력 내역 파일에 '칸 부족'으로 남겼습니다.")
         ui.ok(f"‘{target.sheet}’ {where}에 {len(p.to_write)}개 입력했습니다." + (" 대표 도메인(D6)도 적었습니다." if p.cells else ""))
         return Filled(target, "입력 완료", where, len(p.to_write), len(p.duplicates), len(p.overflow), str(self.out.resolve()))
 

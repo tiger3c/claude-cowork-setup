@@ -547,3 +547,41 @@ def test_crawler_never_triggers_state_changing_requests():
         assert ("공지사항",) in clicked and ("Exchange rate",) in clicked        # navigation menus were opened
     finally:
         server.shutdown()
+
+
+def test_google_writer_guards(tmp_path, monkeypatch, gas):
+    port, state_ = gas([{"name": "00_Sample", "cells": {**FORM}},
+                        {"name": "05_숨김", "hidden": True, "cells": {**FORM}},
+                        {"name": "06_병합정리", "cells": {**FORM, "H13": "고객센터", "I14": "공지", "J14": "FAQ"}, "merges": ["H13:J13"]},
+                        {"name": "07_다른양식", "cells": {"A13": "11 Depth", "A14": "2 Depth", "A15": "3 Depth"}}])
+    client = gsheet.Client(f"http://127.0.0.1:{port}/", "k", spreadsheet=BOOK)
+    for name in ("00_Sample", "05_숨김", "07_다른양식"):
+        with pytest.raises(gsheet.SheetError):
+            client.fill(name, [["x"]])
+    res = client.clear("06_병합정리", [{"col": 8, "menu": ["고객센터", "", ""]}])
+    assert res["cleared"] == [] and res["skipped"] == [8]                # a merged label is never emptied
+    assert all(not s["writes"] for s in state_())
+
+
+def test_google_addresses_and_test_hatch(monkeypatch):
+    sid = "1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
+    assert gsheet.sheet_ref(f"https://docs.google.com/spreadsheets/u/1/d/{sid}/edit#gid=5").endswith(f"/d/{sid}/edit")
+    assert gsheet.sheet_ref(f"docs.google.com/spreadsheets/d/{sid}/edit") != ""
+    monkeypatch.setenv("MENU_CRAWLER_GSHEET_TEST", "0")
+    with pytest.raises(gsheet.SheetError):
+        gsheet.Client("http://127.0.0.1:1/", "k")
+    monkeypatch.setenv("MENU_CRAWLER_GSHEET_TEST", "1")
+    with pytest.raises(gsheet.SheetError):
+        gsheet.Client("http://127.0.0.1:1@evil.example/x", "k")
+
+
+def test_wrong_layout_sheet_is_refused_before_crawling(tmp_path, monkeypatch, capsys):
+    book = book_with_domains(tmp_path / "작업.xlsx")
+    wb = load_workbook(book)
+    ws = wb["02_빈시트"]
+    ws["A13"], ws["A14"], ws["A15"], ws["D6"] = "메뉴 번호", "1 Depth", "2 Depth", "https://x.example.com"
+    wb.save(book)
+    with pytest.raises(SystemExit):                     # nothing valid to crawl: it keeps asking for a target
+        run(monkeypatch, tmp_path, [str(book), "02"])
+    out = capsys.readouterr().out
+    assert "기입할 수 없습니다" in out and "수집 방식을 선택하세요" not in out

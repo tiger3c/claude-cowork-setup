@@ -28,6 +28,7 @@ from .gsheet import SheetError
 from .ui import ask, ask_int, ask_yes
 from .export import make_workbook, select_menus
 from .models import MODES, CrawlConfig
+from .urls import normalize_host
 
 BUSY = {"starting", "crawling", "capturing"}
 MODE_KEYS = {"1": "auto", "2": "public", "3": "login", "4": "compare"}
@@ -128,8 +129,13 @@ def advanced_settings(args, settings, interactive):
     settings["delay_ms"] = ask_int("    페이지 간격, 밀리초 (300 = 0.3초)", settings["delay_ms"], 0, 5000)
     settings["click_menus"] = ask_yes("    javascript: 메뉴를 눌러 보기", settings["click_menus"])
     args.selector = ask("    메뉴 영역 CSS 선택자 (없으면 Enter = 자동)", args.selector)
-    hosts = ask("    추가 호스트 (쉼표로 구분, 없으면 Enter)")
-    args.extra_host = args.extra_host + [h.strip() for h in hosts.split(",") if h.strip()]
+    while True:
+        hosts = [h.strip() for h in ask("    추가 호스트 (쉼표로 구분, 없으면 Enter, 예: login.example.com)").split(",") if h.strip()]
+        try:
+            args.extra_host = args.extra_host + [normalize_host(h) for h in hosts]
+            break
+        except ValueError as exc:
+            print(f"  {exc}")
     print("  변경한 설정")
     show_settings(args, settings)
 
@@ -363,6 +369,9 @@ def summary(data):
     vis = Counter(m["visibility"] for m in menus if m.get("visibility"))
     if vis and vis["로그인 후 전용"]:
         print(f"  로그인 전 공개 {vis['로그인 전 공개']}개 | 로그인 후 전용 {vis['로그인 후 전용']}개")
+    after = "after" in data.get("phases_done", [])
+    status_help = {**STATUS_HELP, **({"로그인 필요": "로그인한 뒤에도 로그인 화면이 나옴 (그 메뉴 권한이 없거나 로그인이 풀림)"} if after else {})}
+    issue_help = {**ISSUE_HELP, **({"로그인 필요": ("로그인한 뒤에도 로그인 화면이 나온 주소", "계정 권한을 확인하거나 다시 로그인해 수집합니다.")} if after else {})}
     print()
     print("  상태별 메뉴")
     by_status = {}
@@ -370,7 +379,7 @@ def summary(data):
         if m["kind"] != "group":
             by_status.setdefault(m["status"], []).append(" > ".join(m["path"][:3]))
     for status, names in sorted(by_status.items(), key=lambda x: (x[0] != "수집됨", -len(x[1]))):
-        print(f"    - {status} {len(names)}개: " + ui.dim(STATUS_HELP.get(status, "")))
+        print(f"    - {status} {len(names)}개: " + ui.dim(status_help.get(status, "")))
         if status != "수집됨":
             shown = " | ".join(names[:5]) + (f"  ... 외 {len(names) - 5}개" if len(names) > 5 else "")
             ui.say(ui.dim(shown), indent="        ")
@@ -382,7 +391,7 @@ def summary(data):
         for item in open_issues:
             groups.setdefault(item["kind"], []).append(item)
         for kind, items in sorted(groups.items(), key=lambda x: -len(x[1])):
-            meaning, todo = ISSUE_HELP.get(kind, (items[0].get("reason", ""), ""))
+            meaning, todo = issue_help.get(kind, (items[0].get("reason", ""), ""))
             print(f"    - {kind} {len(items)}건: " + ui.dim(meaning))
             if todo:
                 print("        " + ui.dim("할 일: " + todo))
@@ -1033,7 +1042,7 @@ def campaign(args):
         print()
         print("  " + ui.dim("로그인 페이지는 보통 점검 주소에서 바로 이동할 수 있습니다."))
         if ask_yes("  점검 주소와 다른 로그인 페이지 주소를 따로 지정할 대상이 있나요?", False):
-            plan = [(t, url, ask(f"    {t.sheet or '진단 시트'} 로그인 주소 (없으면 Enter)")) for t, url, _ in plan]
+            plan = [(t, url, ask_optional_url(f"    {t.sheet or '진단 시트'} 로그인 주소 (없으면 Enter)")) for t, url, _ in plan]
     settings = base_settings(args)
     advanced_settings(args, settings, True)
 
@@ -1149,8 +1158,12 @@ def report(done, board, mode, args, stop=None, offer_open=True):
     """Result table, work log, where the filled workbook is."""
     ui.header("작업 결과", board.label)
     ui.table([("진단 시트", 26), ("수집", 5), ("기입", 17), ("중복", 5), ("위치", 13), ("점검 주소", 0)],
-             [[f.target.sheet or "진단 시트", str(n) if n else "-", f.status + (f" {f.written}개" if f.written else ""),
+             [[f.target.sheet or "진단 시트", str(n) if n else "-",
+               f.status + (f" {f.written}개" if f.written else "") + (f" (칸 부족 {f.overflow})" if f.overflow else ""),
                str(f.duplicates) if f.duplicates else "-", f.where or "-", url] for f, n, _, url in done])
+    short = sum(f.overflow for f, _, _, _ in done)
+    if short:
+        ui.note(f"빈 열이 모자라 넣지 못한 메뉴 {short}개가 있습니다. 입력 내역 파일(.tsv)의 '칸 부족' 줄을 확인하세요.")
     files = [name for _, _, name, _ in done if name]
     if files:
         print("  " + ui.dim(f"메뉴 목록 엑셀 {len(files)}개: {(Path('결과')).resolve()}"))
@@ -1173,7 +1186,7 @@ def report(done, board, mode, args, stop=None, offer_open=True):
             print("  " + board.client.spreadsheet)
             for f, _, _, _ in done:
                 if f.status == "입력 완료" and f.file.startswith("http"):
-                    ui.say(ui.dim(f"{f.target.sheet}: {f.file}"), indent="    ")
+                    print("    " + ui.dim(f"{f.target.sheet}: ") + f.file)
             if os.name == "nt" and offer_open and not args.no_open and not args.yes and stop is None and ask_yes("  구글 시트를 브라우저로 열까요?", True):
                 import webbrowser
                 webbrowser.open(board.client.spreadsheet)
@@ -1375,6 +1388,9 @@ def pick_plan(board, args, items):
     key = lambda name: "".join((name or "").split()).lower()  # noqa: E731
 
     def add(t, url):
+        if not t.layout:
+            ui.fail(f"{t.sheet}: 13~15행이 1·2·3 Depth 행이 아니라 이 시트에는 기입할 수 없습니다(양식 확인). 대상에서 뺐습니다.")
+            return
         if any(key(x.sheet) == key(t.sheet) and u == url for x, u, _ in plan):
             ui.note(f"이미 넣은 대상이라 건너뜁니다: {t.sheet}  {url}")
             return

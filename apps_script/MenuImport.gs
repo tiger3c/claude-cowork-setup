@@ -43,6 +43,7 @@ function doPost(e) {
   var req;
   try {
     req = JSON.parse(e.postData.contents);
+    if (!req || typeof req !== 'object') throw new Error('empty');
   } catch (err) {
     return reply({ ok: false, error: '요청 형식이 올바르지 않습니다.' });
   }
@@ -86,7 +87,7 @@ function listTargets(ss) {
   var out = [];
   ss.getSheets().forEach(function (sh) {
     var name = sh.getName();
-    if (!SITE_SHEET.test(name) || name.toLowerCase() === '00_sample' || sh.isSheetHidden()) return;
+    if (!isSiteSheet(sh)) return;
     var head = sh.getRange('D3:D6').getDisplayValues();
     var area = readArea(sh);
     var info = planFill(area.menus, area.results, []);
@@ -95,7 +96,8 @@ function listTargets(ss) {
       name: cleanText(head[0][0]) || name.replace(/^\d{2,3}_/, ''),
       domain: cleanText(head[3][0], 2000),
       menus: info.existing,
-      start: info.start
+      start: info.start,
+      layout: layoutOk(sh)
     });
   });
   return out;
@@ -103,12 +105,21 @@ function listTargets(ss) {
 
 function layoutOk(sh) {    // rows 13~15 must be the 1/2/3 Depth rows of the diagnosis form
   var labels = sh.getRange('A13:A15').getDisplayValues().map(function (r) { return cleanText(r[0]); });
-  return [1, 2, 3].every(function (n, i) { return new RegExp(n + '\\s*(depth|단계|뎁스)', 'i').test(labels[i]); });
+  return [1, 2, 3].every(function (n, i) { return new RegExp('^\\s*' + n + '\\s*(depth|단계|뎁스)', 'i').test(labels[i]); });
+}
+
+function isSiteSheet(sh) {
+  var name = sh.getName();
+  return SITE_SHEET.test(name) && name.toLowerCase() !== '00_sample' && !sh.isSheetHidden();
 }
 
 function fillSheet(ss, req) {
   var sh = ss.getSheetByName(req.sheet);
   if (!sh) return { ok: false, error: '시트를 찾을 수 없습니다: ' + req.sheet };
+  if (!isSiteSheet(sh)) return { ok: false, error: "'" + req.sheet + "' 은(는) 진단 시트(01_ 형식, 숨김·00_Sample 제외)가 아닙니다." };
+  if (!Array.isArray(req.menus) || req.menus.some(function (m) { return !Array.isArray(m); })) {
+    return { ok: false, error: '메뉴 형식이 올바르지 않습니다.' };
+  }
   if (!layoutOk(sh)) {
     return { ok: false, error: "'" + req.sheet + "' 시트의 13~15행이 1·2·3 Depth 행이 아닙니다. 진단표 양식이 달라 입력하지 않았습니다." };
   }
@@ -127,6 +138,12 @@ function fillSheet(ss, req) {
     p.url = ss.getUrl().replace(/#.*$/, '') + '#gid=' + p.gid;
     p.range = p.columns.length ? colName(p.columns[0]) + MENU_ROW + ':' + colName(p.columns[p.columns.length - 1]) + (MENU_ROW + 2) : '';
     if (!req.dryRun && p.write.length) {
+      // another deployment (another account) has its own lock: the planned cells must still be empty right now
+      var busy = p.columns.filter(function (col) {
+        var cells = sh.getRange(MENU_ROW, col, 3, 1), v = cells.getValues(), f = cells.getFormulas();
+        return v.some(function (r) { return cleanText(r[0]) !== ''; }) || f.some(function (r) { return r[0]; });
+      });
+      if (busy.length) return { ok: false, error: '입력하려던 칸에 그사이 다른 값이 들어왔습니다(' + busy.map(colName).join(', ') + '). 다시 실행하세요.' };
       // contiguous runs of columns (a hidden column splits a run); values only, formats stay
       for (var i = 0; i < p.write.length;) {
         var j = i;
@@ -139,9 +156,11 @@ function fillSheet(ss, req) {
         i = j + 1;
       }
     }
-    if (!req.dryRun && req.domain) {
+    if (!req.dryRun && cleanText(req.domain)) {
       var d6 = sh.getRange('D6');
-      if (cleanText(d6.getValue()) === '' && d6.getFormula() === '') {       // 비어 있을 때만 대표 도메인 기록
+      var merged = d6.getMergedRanges ? d6.getMergedRanges() : [];
+      var topLeft = !merged.length || (merged[0].getRow() === 6 && merged[0].getColumn() === 4);
+      if (topLeft && cleanText(d6.getValue()) === '' && d6.getFormula() === '') {   // 비어 있을 때만 대표 도메인 기록
         d6.setValue("'" + cleanText(req.domain, 2000));
         p.domainSaved = true;
       }
@@ -183,7 +202,11 @@ function clearColumns(ss, req) {
       if (!(c >= 0 && c <= area.lastCol - FIRST_COL)) { skipped.push(item.col); return; }
       var now = [0, 1, 2].map(function (r) { return cleanText(area.menus[r][c]); });
       var want = [0, 1, 2].map(function (i) { return cleanText((item.menu || [])[i]); });
-      var formula = sh.getRange(MENU_ROW, Number(item.col), 3, 1).getFormulas().some(function (r) { return r[0]; });
+      var range = sh.getRange(MENU_ROW, Number(item.col), 3, 1);
+      var formula = range.getFormulas().some(function (r) { return r[0]; });
+      if (range.getMergedRanges().length || want.some(function (x) { return x === '=formula' || x === '=merged'; })) {
+        skipped.push(item.col); return;                                      // merged labels belong to other columns too
+      }
       var results = area.results.some(function (row) { return cleanText(row[c]) !== ''; });
       if (formula || results || now.join('\u0001') !== want.join('\u0001')) { skipped.push(item.col); return; }
       sh.getRange(MENU_ROW, Number(item.col), 3, 1).setValues([[''], [''], ['']]);   // values only, formats stay
@@ -266,7 +289,8 @@ function planFill(menuRows, resultRows, menus, lastCol, hidden) {
 }
 
 function cleanText(v, limit) {
-  return String(v === null || v === undefined ? '' : v).replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, limit || 240);
+  var s = String(v === null || v === undefined ? '' : v).replace(/[\u0000-\u001f\u007f-\u009f\ufeff]/g, ' ').replace(/\s+/g, ' ').trim();
+  return Array.from(s).slice(0, limit || 240).join('');                     // by characters, never half an emoji
 }
 
 function colName(n) {

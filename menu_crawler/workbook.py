@@ -88,7 +88,7 @@ class Workbook:
             if not area(ci, ri):
                 continue
             value = self._value(c)
-            if value not in (None, ""):
+            if value not in (None, "") and (value in MARKERS or clean(value)):   # blank / space-only = empty (as in Sheets)
                 out[(ci, ri)] = value
         for (c1, r1), (c2, r2) in merges(root):
             anchor = out.get((c1, r1), "")
@@ -182,7 +182,7 @@ CONTROL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ud800-\udfff\ufffe\uffff]"
 
 def clean(text, limit=240):
     """One line, at most `limit` characters, and only characters an xlsx file can hold."""
-    return " ".join(CONTROL.sub(" ", str(text or "")).split())[:limit]
+    return " ".join(CONTROL.sub(" ", str(text or "")).replace("\ufeff", " ").split())[:limit]
 
 
 def menu_keys(grid):
@@ -195,13 +195,17 @@ def menu_keys(grid):
     return keys
 
 
-DEPTH_LABEL = [re.compile(rf"{n}\s*(?:depth|단계|뎁스)", re.I) for n in (1, 2, 3)]
+DEPTH_LABEL = [re.compile(rf"^\s*{n}\s*(?:depth|단계|뎁스)", re.I) for n in (1, 2, 3)]
+
+
+def layout_ok(labels):
+    return all(DEPTH_LABEL[i].search(labels.get(r, "")) for i, r in enumerate(MENU_ROWS))
 
 
 def check_layout(wb, sheet, root):
     """Rows 13~15 must be the 1/2/3 Depth rows of the diagnosis form; refuse to write into another layout."""
     labels = {ri: clean(wb._value(c) or "") for c, ci, ri in cells(root) if ci == 1 and ri in MENU_ROWS}
-    if not all(DEPTH_LABEL[i].search(labels.get(r, "")) for i, r in enumerate(MENU_ROWS)):
+    if not layout_ok(labels):
         raise ValueError(f"'{sheet}' 시트의 13~15행이 1·2·3 Depth 행이 아닙니다. 진단표 양식이 달라 입력하지 않았습니다.")
 
 
@@ -649,6 +653,7 @@ class Target:
     start: int = FIRST_COL        # first column after the last used one
     d6: str = ""                  # 대표 도메인 cell as it is (empty -> can be filled in)
     save_domain: str = ""         # inspection URL to write into an empty D6 together with the menus
+    layout: bool = True           # rows 13~15 are the 1/2/3 Depth rows of the form
 
     @property
     def addresses(self):
@@ -710,13 +715,15 @@ def targets(path):
     for sheet in wb.site_sheets():
         root = wb.root(sheet)
         head = {ri: wb._value(c) or "" for c, ci, ri in cells(root) if ci == 4 and ri in (3, 6)}
+        labels = {ri: clean(wb._value(c) or "") for c, ci, ri in cells(root) if ci == 1 and ri in MENU_ROWS}
         grid = wb.grid(sheet, root)
         menus = {c for (c, r), v in grid.items() if r in MENU_ROWS and v not in MARKERS}
         name = clean(head.get(3, ""))
         if not name or name in MARKERS or name.startswith("예)"):
             name = sheet.split("_", 1)[-1]
         d6 = clean(head.get(6, ""), 2000)
-        out.append(Target(sheet, name, _domain(d6), len(menus), next_column(grid, root), "" if d6 in MARKERS else d6))
+        out.append(Target(sheet, name, _domain(d6), len(menus), next_column(grid, root), "" if d6 in MARKERS else d6,
+                          layout=layout_ok(labels)))
     return out
 
 

@@ -5,6 +5,7 @@ changes formats, formulas or other cells. The connection (web app URL + 연결 �
 in google_sheet.json next to run.bat (ignored by git).
 """
 import json
+from urllib.parse import urlsplit
 import re
 import os
 import urllib.error
@@ -71,7 +72,7 @@ def remove_connection(index):
     return keep
 
 
-SHEET_URL = re.compile(r"^https://docs\.google\.com/spreadsheets/d/([a-zA-Z0-9_-]{20,})")
+SHEET_URL = re.compile(r"^(?:https?://)?docs\.google\.com/spreadsheets/(?:u/\d+/)?d/([a-zA-Z0-9_-]{20,})")
 
 
 def sheet_ref(text):
@@ -86,7 +87,8 @@ def sheet_ref(text):
 class Client:
     def __init__(self, url, token, timeout=120, spreadsheet="", name=""):
         url = url.strip()
-        local_test = os.environ.get("MENU_CRAWLER_GSHEET_TEST") and url.startswith("http://127.0.0.1:")
+        local_test = os.environ.get("MENU_CRAWLER_GSHEET_TEST") == "1" and urlsplit(url).scheme == "http" \
+            and urlsplit(url).hostname == "127.0.0.1" and "@" not in urlsplit(url).netloc
         if not url.startswith("https://script.google.com/") and not local_test:
             raise SheetError("웹 앱 URL은 https://script.google.com/ 으로 시작해야 합니다. (배포 → 웹 앱 URL)")
         self.url, self.token, self.timeout, self.spreadsheet, self.name = url, token.strip(), timeout, spreadsheet, name
@@ -119,7 +121,8 @@ class Client:
     def targets(self):
         data = self.call("targets")
         return data["title"], [diag.Target(t["sheet"], t.get("name") or "", diag._domain(t.get("domain", "")),
-                                           int(t.get("menus", 0)), int(t.get("start", diag.FIRST_COL)), diag.clean(t.get("domain", "")))
+                                           int(t.get("menus", 0)), int(t.get("start", diag.FIRST_COL)), diag.clean(t.get("domain", ""), 2000),
+                                           layout=t.get("layout", True) is not False)
                                for t in data["targets"]]
 
     def fill(self, sheet, menus, dry_run=False, domain=""):

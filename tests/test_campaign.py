@@ -654,13 +654,15 @@ def test_page_keeps_loading_while_the_user_logs_in(tmp_path):
         time.sleep(2)                                   # the user is logging in; the crawler is idle
         assert ("GET", "/late-screen.xml") in seen     # screens that load after the first paint (WebSquare) arrive
         assert ("POST", "/late-post") in seen           # the login request itself is not blocked either
-        assert ("GET", "/after-alert") not in seen     # an alert during login is left to the user, not auto-closed
-        job.command("crawl", phase="after")             # the user starts the crawl with the alert still open
+        # an alert the site opens during login freezes the page (and its box may not even be visible):
+        # it is answered at once and reported, so the user can go on logging in
+        assert ("GET", "/after-alert") in seen
+        assert job.snapshot()["dialogs"] == [{"type": "alert", "message": "already signed in", "answer": "확인", "phase": "로그인 단계"}]
+        job.command("crawl", phase="after")
         end = time.monotonic() + 40
         while job.snapshot()["state"] == "crawling" and time.monotonic() < end:
             time.sleep(0.2)
-        assert job.snapshot()["state"] == "complete"    # the leftover alert was closed, the crawl did not hang
-        assert ("GET", "/after-alert") in seen
+        assert job.snapshot()["state"] == "complete"
     finally:
         job.close()
         job.thread.join(timeout=10)
@@ -711,4 +713,45 @@ def test_post_navigation_is_blocked_by_default_and_can_be_allowed():
         assert [p for m, p in seen if m == "POST"] == ["/screen.do"]                                   # transfer stays blocked
         assert menus["계좌조회"]["status"] == "수집됨" and menus["빠른메뉴"]["status"] == "동작 확인 필요"
     finally:
+        server.shutdown()
+
+
+def test_confirm_windows_follow_the_users_choice_in_the_login_step():
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from menu_crawler.crawler import Job
+    from menu_crawler.models import CrawlConfig
+    seen = []
+    page = "<html><body><script>setTimeout(() => fetch(confirm('End the other session?') ? '/said-ok' : '/said-cancel'), 300);</script></body></html>"
+
+    class Ask(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(page.encode() if self.path == "/" else b"ok")
+
+        def log_message(self, *a):
+            pass
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Ask)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_address[1]}/"
+    job = Job(CrawlConfig(url=url, mode="login", headless=True, browser="chromium", wait_ms=0, delay_ms=0))
+    try:
+        end = time.monotonic() + 20
+        while job.snapshot()["state"] != "ready" and time.monotonic() < end:
+            time.sleep(0.1)
+        time.sleep(1.5)
+        assert "/said-cancel" in seen and "/said-ok" not in seen           # default: Cancel
+        job.wait_done(job.command("confirm", accept=True))
+        job.wait_done(job.command("goto", url=url))                         # 'o' = open the page again
+        time.sleep(1.5)
+        assert "/said-ok" in seen
+        assert [d["answer"] for d in job.snapshot()["dialogs"]] == ["취소", "확인"]
+        assert "창 " in job.wait_done(job.command("inspect"))["message"]
+    finally:
+        job.close()
+        job.thread.join(timeout=10)
         server.shutdown()

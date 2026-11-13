@@ -107,6 +107,7 @@ class Report:
     current_url: str = ""
     limit_reached: bool = False
     session_lost: bool = False      # after login, page after page showed the login screen again
+    dialogs: list = field(default_factory=list)   # alert/confirm windows the site opened: {type, message, answer, phase}
     phase: str = ""
     phases_done: list[str] = field(default_factory=list)
     login_check: str = ""

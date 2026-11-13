@@ -64,7 +64,7 @@ class Crawler:
         self.guarding = False
         self.own_pages = []
         self.guarded = []
-        self.open_dialogs = []
+        self.confirm_accept = False     # login step: answer the site's confirm windows with OK instead of Cancel
         self.blocked = 0
         self.issue_keys: set[tuple] = set()
         self.phase = "after" if config.mode == "login" else "before"
@@ -123,7 +123,8 @@ class Crawler:
                     headless=self.config.headless,
                     # no "translate this page?" bar, Korean UI, and the normal popup blocker back on
                     # (pages may not open windows by themselves; a click the user makes still can).
-                    args=["--disable-features=Translate,TranslateUI", "--lang=ko-KR", "--no-first-run", "--no-default-browser-check"],
+                    args=["--disable-features=Translate,TranslateUI", "--lang=ko-KR", "--no-first-run", "--no-default-browser-check",
+                          "--start-maximized"],
                     ignore_default_args=["--disable-popup-blocking"], **extra)
                 break
             except BrowserError:
@@ -131,8 +132,10 @@ class Crawler:
         if not self.browser:
             raise RuntimeError("브라우저를 열지 못했습니다. Edge/Chrome을 설치하거나 install_browser.bat를 실행하세요. 회사 브라우저 정책도 확인하세요.")
         # Test/dev servers of a diagnosis target often use self-signed certificates.
-        self.context = self.browser.new_context(accept_downloads=False, ignore_https_errors=True, locale="ko-KR",
-                                                viewport={"width": 1440, "height": 1000})
+        # A window the user works in (login) follows its real size; a fixed viewport larger than the window cuts
+        # the page off without scroll bars. Headless keeps a fixed size.
+        size = {"viewport": {"width": 1440, "height": 1000}} if self.config.headless else {"no_viewport": True}
+        self.context = self.browser.new_context(accept_downloads=False, ignore_https_errors=True, locale="ko-KR", **size)
         self.context.on("page", self.on_page)
         self.page = self.new_tab()
         self.page.set_default_timeout(self.config.timeout_ms)
@@ -168,23 +171,35 @@ class Crawler:
                 self.set_guard(page, True)
 
     def on_dialog(self, dialog):
-        """alert/confirm: dismissed while crawling; while the user logs in they are the user's to answer."""
-        if not self.guarding:
-            self.open_dialogs.append(dialog)          # the user may answer it; closed at the next crawl if still open
-            return
+        """alert / confirm / prompt windows of the site. An open one freezes the whole page (the browser greys it
+        out) and on some PCs its box is not even shown, so they are always answered here, at once, and reported:
+        alert -> OK; leaving a page (beforeunload) -> leave; confirm -> Cancel, or OK when the user chose so for the
+        login step; prompt -> Cancel. While crawling a confirm is always cancelled."""
         try:
-            dialog.dismiss()
+            kind, message = dialog.type, " ".join((dialog.message or "").split())[:300]
+            accept = kind in {"alert", "beforeunload"} or (kind == "confirm" and self.confirm_accept and not self.guarding)
+            (dialog.accept if accept else dialog.dismiss)()
         except BrowserError:
-            pass                                      # already answered by the user
+            return
+        if kind != "beforeunload" and len(self.report.dialogs) < 50:
+            self.report.dialogs.append({"type": kind, "message": message, "answer": "확인" if accept else "취소",
+                                        "phase": "수집 중" if self.guarding else "로그인 단계"})
+            self.emit()
 
-    def close_dialogs(self):
-        """A dialog left open from the login step would hold the page: close what is still open."""
-        dialogs, self.open_dialogs = self.open_dialogs, []
-        for dialog in dialogs:
-            try:
-                dialog.dismiss()
-            except BrowserError:
-                pass                                  # the user had already answered it
+    def inspect(self):
+        """What is on top of the page right now (for the login step's diagnosis line); no page content is kept."""
+        try:
+            info = self.page.evaluate("""() => {
+                const el = document.elementFromPoint(innerWidth / 2, innerHeight / 2);
+                const st = el ? getComputedStyle(el) : null;
+                const layers = [...document.querySelectorAll('body *')].filter(e => { const s = getComputedStyle(e);
+                    const r = e.getBoundingClientRect(); return s.position === 'fixed' && s.display !== 'none'
+                        && r.width >= innerWidth * 0.9 && r.height >= innerHeight * 0.9; }).length;
+                return `창 ${innerWidth}x${innerHeight} · 화면 가운데 요소 <${el ? el.tagName.toLowerCase() : '?'} id="${el?.id || ''}" class="${String(el?.className || '').slice(0, 60)}">`
+                    + ` z-index ${st ? st.zIndex : '?'} · 전체 화면을 덮는 층 ${layers}개 · 상태 ${document.readyState}`; }""")
+        except BrowserError as exc:
+            info = "화면을 읽지 못했습니다: " + self.error_text(exc)
+        self.emit(None, f"{info} · 알림 창 {len(self.report.dialogs)}건")
 
     def set_guard(self, page, on):
         """The request guard is installed only while crawling. Requests are answered by this thread, so a guard
@@ -554,7 +569,6 @@ class Crawler:
             self.issue("동적 메뉴 확인", page.url, "일부 메뉴가 마우스 이동만으로 열리지 않았습니다. 직접 열어 현재 화면 추가를 사용하세요.")
 
     def capture(self, phase=None):
-        self.close_dialogs()
         if phase:
             self.phase = phase
         count = 0
@@ -573,7 +587,6 @@ class Crawler:
 
     def goto(self, url):
         """Bring the login screen to the front of the collection browser."""
-        self.close_dialogs()
         try:
             if self.page.is_closed():
                 self.page = self.new_tab()
@@ -589,7 +602,6 @@ class Crawler:
 
         Values are used once and never stored in the report, logs or exports.
         """
-        self.close_dialogs()
         pages = [p for p in self.mine() + list(reversed(self.context.pages)) if not p.is_closed()]
         for page in dict.fromkeys(pages):
             if urlsplit(canonical_url(page.url)).netloc.lower() not in self.hosts:
@@ -649,7 +661,6 @@ class Crawler:
 
     def crawl(self, phase=None, resume=False):
         self.closing_popups = self.guarding = True
-        self.close_dialogs()
         for page in self.mine():
             self.set_guard(page, True)
         try:
@@ -871,6 +882,11 @@ class Job:
                     engine.goto(args["url"])
                 elif command == "fill":
                     engine.fill_login(args.get("username", ""), args.get("password", ""))
+                elif command == "confirm":
+                    engine.confirm_accept = bool(args.get("accept"))
+                    engine.emit(None, "확인 창에 '확인'으로 답합니다." if engine.confirm_accept else "확인 창에 '취소'로 답합니다.")
+                elif command == "inspect":
+                    engine.inspect()
                 args.clear()
                 self.completed += 1
         except Exception as exc:

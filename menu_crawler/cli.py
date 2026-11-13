@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections import Counter
 from datetime import datetime
@@ -274,7 +275,44 @@ def site_of(url):
     return ".".join(parts[-3:]) if parts[-2] in {"co", "or", "go", "ac", "ne", "re", "pe", "com", "net", "org", "gov", "edu"} else ".".join(parts[-2:])
 
 
+class DialogWatch:
+    """Prints the site's alert/confirm windows as they are answered, while the console waits for the user."""
+
+    def __init__(self, job):
+        self.job, self.shown, self.stop = job, len(job.snapshot().get("dialogs", [])), threading.Event()
+        self.thread = threading.Thread(target=self.run, daemon=True)
+        self.thread.start()
+
+    def flush(self):
+        dialogs = self.job.snapshot().get("dialogs", [])
+        for d in dialogs[self.shown:]:
+            kind = {"alert": "알림 창", "confirm": "확인 창", "prompt": "입력 창"}.get(d["type"], d["type"])
+            print(f"\n  [사이트 {kind}] \"{d['message'][:160]}\" -> '{d['answer']}'으로 닫았습니다.")
+            if d["type"] == "confirm" and d["answer"] == "취소":
+                print("  " + ui.dim("'확인'을 눌러야 하는 창이면 y 를 입력한 뒤 o 로 화면을 다시 여세요."))
+        self.shown = len(dialogs)
+
+    def run(self):
+        while not self.stop.wait(0.5):
+            try:
+                self.flush()
+            except Exception:  # noqa: BLE001 - a status line must never break the login step
+                return
+
+    def close(self):
+        self.stop.set()
+        self.flush()
+
+
 def login_step(job, config, username=None):
+    watch = DialogWatch(job)
+    try:
+        return _login_step(job, config, username, watch)
+    finally:
+        watch.close()
+
+
+def _login_step(job, config, username, watch):
     title("로그인 단계")
     ui.beep()
     ui.window_title("로그인이 필요합니다")
@@ -284,6 +322,7 @@ def login_step(job, config, username=None):
         print("  1. 열린 브라우저 창에서 로그인하세요. 보안문자·OTP·추가 인증까지 마칩니다.")
     print("  2. 로그인된 화면이 보이면 여기서 Enter를 누르세요.")
     print("  ※ 아이디·비밀번호는 파일·엑셀·기록에 저장하지 않습니다.")
+    print("  " + ui.dim("사이트가 띄우는 알림 창은 수집기가 바로 닫고 여기에 내용을 보여 줍니다(열려 있으면 화면 전체가 회색으로 멈춤)."))
     print("  " + run_command(job, "goto", url=config.login_url or config.url)["message"])
     if username is not None and not Account.username:
         Account.username = username
@@ -293,13 +332,17 @@ def login_step(job, config, username=None):
         autofill(job, Account.username, Account.password, site)
     elif username is not None:
         autofill(job, username, site=site)
+    confirm_ok = False
     while True:
+        watch.flush()
         print()
         print("  [Enter] 로그인 완료 -> 수집 시작")
         print("  [a] 아이디/비밀번호 자동 입력 (로그인 버튼은 직접 누름)")
         print("  [o] 로그인 화면 다시 열기")
         print("  [c] 지금 열린 화면의 메뉴만 추가")
         print("  [p] 로그인 없이 공개 메뉴만 수집 (계정 문제 등으로 로그인이 안 될 때)")
+        print(f"  [y] 사이트 확인 창(확인/취소)에 답하는 방법 바꾸기 (지금: {'확인' if confirm_ok else '취소'})")
+        print("  [i] 화면이 멈췄을 때: 화면 상태 진단")
         print("  [q] 로그인 없이 종료하고 지금까지 결과 저장")
         choice = ask("  선택").lower()
         if choice == "":
@@ -314,6 +357,11 @@ def login_step(job, config, username=None):
         elif choice in {"c", "ㅊ"}:
             job.command("capture", phase="after")
             print("  " + wait(job, quiet=True)["message"])
+        elif choice in {"y", "ㅛ"}:
+            confirm_ok = not confirm_ok
+            print("  " + run_command(job, "confirm", accept=confirm_ok)["message"] + " 화면을 다시 열려면 o 를 누르세요.")
+        elif choice in {"i", "ㅑ"}:
+            print("  " + run_command(job, "inspect")["message"])
         elif choice in {"q", "ㅂ"}:
             return False
 
@@ -388,6 +436,12 @@ def summary(data):
         if status != "수집됨":
             shown = " | ".join(names[:5]) + (f"  ... 외 {len(names) - 5}개" if len(names) > 5 else "")
             ui.say(ui.dim(shown), indent="        ")
+    dialogs = data.get("dialogs") or []
+    if dialogs:
+        print()
+        print(f"  사이트 알림 창 {len(dialogs)}건 " + ui.dim("(수집기가 닫음)"))
+        for text, n in Counter(f"{d['message'][:90]} -> {d['answer']}" for d in dialogs).most_common(3):
+            ui.say(ui.dim(f"{text}" + (f"  x{n}" if n > 1 else "")), indent="    - ")
     open_issues = [x for x in data["issues"] if not x.get("resolved")]
     if open_issues:
         print()

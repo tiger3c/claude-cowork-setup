@@ -600,3 +600,19 @@ def test_outdated_apps_script_deployment_is_reported(tmp_path, monkeypatch, gas,
     with pytest.raises(SystemExit):                                                                  # default answer: stop
         run(monkeypatch, tmp_path, [f"https://docs.google.com/spreadsheets/d/{BOOK}/edit", ""])
     assert "예전 버전" in capsys.readouterr().out
+
+
+def test_menus_can_be_left_out_before_the_google_fill(site, tmp_path, monkeypatch, gas, capsys):  # noqa: F811
+    from menu_crawler import ui
+    _, state_ = gas([{"name": "05_사이트", "cells": {**FORM, "D6": site}}])
+    url = f"https://docs.google.com/spreadsheets/d/{BOOK}/edit"
+    run(monkeypatch, tmp_path, [url, "05", "", "2", "n", "", "", "v", "1", ""])     # v = list, leave out number 1, Enter = fill
+    cells = state_()[0]["cells"]
+    names = [cells.get(f"{c}13") for c in "HIJK"]
+    assert "로그인" not in names and "고객센터" in names and names[2:] == [None, None]   # two of three written, no gap
+    assert "골라서 뺀 메뉴 1개" in capsys.readouterr().out
+    assert ui.pick_numbers("3, 7-9 12", 12) == {3, 7, 8, 9, 12} and ui.pick_numbers("", 5) == set()
+    with pytest.raises(ValueError):
+        ui.pick_numbers("0", 5)
+    with pytest.raises(ValueError):
+        ui.pick_numbers("a", 5)

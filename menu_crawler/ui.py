@@ -237,3 +237,20 @@ def window_title(text):
         ctypes.windll.kernel32.SetConsoleTitleW(f"웹 메뉴 수집기 - {text}")
     except (AttributeError, OSError):
         pass
+
+
+def pick_numbers(text, count):
+    """'3, 7-9 12' -> {3, 7, 8, 9, 12} within 1..count; raises ValueError on anything else."""
+    out = set()
+    for token in re.split(r"[,\s]+", re.sub(r"\s*[-~]\s*", "-", (text or "").strip())):
+        if not token:
+            continue
+        m = re.fullmatch(r"(\d+)(?:-(\d+))?", token)
+        if not m:
+            raise ValueError(f"'{token}'은(는) 번호가 아닙니다.")
+        a, b = int(m.group(1)), int(m.group(2) or m.group(1))
+        a, b = min(a, b), max(a, b)
+        if a < 1 or b > count:
+            raise ValueError(f"번호는 1~{count} 사이로 입력하세요.")
+        out.update(range(a, b + 1))
+    return out

@@ -39,6 +39,22 @@ def _preview(menus, limit=5):
         print("    " + ui.dim(f"… 외 {len(menus) - limit}개"))
 
 
+def _exclude(menus):
+    """Show every menu with a number and return the ones to keep."""
+    rows = [[str(i), " > ".join(d for d in m if d)] for i, m in enumerate(menus, 1)]
+    ui.table([("번호", 4), ("메뉴 경로", 0)], rows, indent="    ")
+    while True:
+        raw = ui.ask("  뺄 번호 (예: 3, 7-9 · Enter=빼지 않음)")
+        try:
+            drop = ui.pick_numbers(raw, len(menus))
+        except ValueError as exc:
+            print(f"  {exc}")
+            continue
+        if drop:
+            print("  " + ui.dim("뺀 메뉴: " + " | ".join(rows[i - 1][1] for i in sorted(drop))[:200]))
+        return [m for i, m in enumerate(menus, 1) if i not in drop]
+
+
 def _safe(name):
     return "".join("_" if c in '\\/:*?"<>|' else c for c in name).strip(" .") or "진단시트"
 
@@ -81,8 +97,28 @@ class SheetsBoard:
                 return Filled(target, "새 메뉴 없음", duplicates=len(pre["duplicates"]), overflow=len(pre["overflow"]))
             print(f"  입력 위치: ‘{target.sheet}’ {pre['range']}  (값만 입력 · 서식·수식·결과 칸은 그대로)")
             _preview(pre["write"])
-            if interactive and not ui.ask_yes("  구글 시트에 바로 입력할까요?", True):
-                return Filled(target, "건너뜀")
+            excluded = 0
+            while interactive:
+                # the sheet keeps what is written (nothing is ever deleted here), so wrong names can be left out first
+                answer = ui.ask("  구글 시트에 입력 | Enter=입력 · v=전체 보기·골라서 빼기 · n=이 대상 건너뛰기").strip().lower()
+                if answer in ui.NO:
+                    return Filled(target, "건너뜀")
+                if answer in {"v", "ㅍ"}:
+                    kept = _exclude(pre["write"])
+                    if len(kept) != len(pre["write"]):
+                        excluded += len(pre["write"]) - len(kept)
+                        menus = kept
+                        pre = self.client.fill(target.sheet, menus, dry_run=True)
+                        if not pre["write"]:
+                            ui.ok("모두 빼서 입력할 메뉴가 없습니다.")
+                            return Filled(target, "건너뜀")
+                        print(f"  입력 위치: ‘{target.sheet}’ {pre['range']}  · {len(pre['write'])}개")
+                    continue
+                if not answer or answer in ui.YES:
+                    break
+                print("  Enter, v, n 중에서 고르세요.")
+            if excluded:
+                print("  " + ui.dim(f"골라서 뺀 메뉴 {excluded}개는 입력하지 않습니다."))
             res = self.client.fill(target.sheet, menus, domain=target.save_domain)
         except SheetError as exc:
             ui.fail(str(exc))

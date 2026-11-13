@@ -99,9 +99,17 @@ function listTargets(ss) {
   return out;
 }
 
+function layoutOk(sh) {    // rows 13~15 must be the 1/2/3 Depth rows of the diagnosis form
+  var labels = sh.getRange('A13:A15').getDisplayValues().map(function (r) { return cleanText(r[0]); });
+  return [1, 2, 3].every(function (n, i) { return new RegExp(n + '\\s*(depth|단계|뎁스)', 'i').test(labels[i]); });
+}
+
 function fillSheet(ss, req) {
   var sh = ss.getSheetByName(req.sheet);
   if (!sh) return { ok: false, error: '시트를 찾을 수 없습니다: ' + req.sheet };
+  if (!layoutOk(sh)) {
+    return { ok: false, error: "'" + req.sheet + "' 시트의 13~15행이 1·2·3 Depth 행이 아닙니다. 진단표 양식이 달라 입력하지 않았습니다." };
+  }
   var lock = LockService.getDocumentLock() || LockService.getScriptLock();   // standalone deployment: script lock
   if (!lock.tryLock(30000)) return { ok: false, error: '다른 사용자가 입력 중입니다. 잠시 후 다시 시도하세요.' };
   try {

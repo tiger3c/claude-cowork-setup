@@ -173,6 +173,7 @@ def test_script_menus_on_a_legacy_english_site_are_filled(tmp_path, monkeypatch)
 
 
 BOOK = "1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
+FORM = {"A13": "1 Depth · 최상위 (필수)", "A14": "2 Depth · 하위 (선택)", "A15": "3 Depth · 세부 (선택)"}
 
 
 @pytest.fixture()
@@ -200,7 +201,7 @@ def gas(tmp_path, monkeypatch):
 def test_google_sheet_full_flow_and_rerun(site, tmp_path, monkeypatch, gas):  # noqa: F811
     _, state = gas([
         {"name": "00_Sample", "cells": {"H13": "예시"}},
-        {"name": "05_사이트", "cells": {"D3": "사이트", "D6": site, "H13": "기존 메뉴", "H20": "양호"},
+        {"name": "05_사이트", "cells": {**FORM, "D3": "사이트", "D6": site, "H13": "기존 메뉴", "H20": "양호"},
          "formulas": {"H16": "=MID(H13,1,9)"}},
         {"name": "07_숨김", "hidden": True, "cells": {"D6": site}},
     ])
@@ -220,13 +221,17 @@ def test_google_sheet_full_flow_and_rerun(site, tmp_path, monkeypatch, gas):  # 
 
 
 def test_google_sheet_skips_merges_formulas_and_hidden_columns(tmp_path, gas):
-    port, state = gas([{"name": "06_병합", "cells": {"H13": "기존", "I14": "탈퇴"}, "merges": ["H13:I13"],
-                        "formulas": {"J13": "=A1"}, "hiddenCols": ["K"]}])
+    port, state = gas([{"name": "06_병합", "cells": {**FORM, "H13": "기존", "I14": "탈퇴"}, "merges": ["H13:I13"],
+                        "formulas": {"J13": "=A1"}, "hiddenCols": ["K"]},
+                       {"name": "08_다른양식", "cells": {"A12": "1 Depth", "A13": "2 Depth", "A14": "3 Depth"}}])
     client = gsheet.Client(f"http://127.0.0.1:{port}/", "k", spreadsheet=f"https://docs.google.com/spreadsheets/d/{BOOK}/edit")
     res = client.fill("06_병합", [["기존", "탈퇴"], ["새1"], ["새2"]])
     assert res["duplicates"] == [["기존", "탈퇴", ""]] and res["columns"] == [12, 13] and res["range"] == "L13:M15"
-    cells = state()[0]["cells"]
+    cells = {x["name"]: x for x in state()}["06_병합"]["cells"]
     assert (cells["L13"], cells["M13"]) == ("새1", "새2") and "K13" not in cells and "J13" not in cells
+    with pytest.raises(gsheet.SheetError, match="양식"):
+        client.fill("08_다른양식", [["새"]])                                          # another layout: nothing written
+    assert {x["name"]: x for x in state()}["08_다른양식"]["writes"] == []
     with pytest.raises(gsheet.SheetError):
         gsheet.Client(f"http://127.0.0.1:{port}/", "wrong", spreadsheet=BOOK).ping()
 

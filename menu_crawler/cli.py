@@ -88,6 +88,46 @@ def ask_mode(initial, default="1"):
         print("  1~4 중에서 선택하세요.")
 
 
+def base_settings(args):
+    return {"max_pages": args.max_pages, "max_seconds": args.max_seconds, "max_hops": args.max_hops,
+            "wait_ms": args.wait_ms, "delay_ms": args.delay_ms, "click_menus": not args.no_click}
+
+
+def show_settings(args, s):
+    rows = [
+        ["방문 페이지 수", f"{s['max_pages']}개" if s["max_pages"] else "제한 없음", "대상 하나에서 열어 볼 최대 페이지 수"],
+        ["수집 시간", f"{s['max_seconds']}초" if s["max_seconds"] else "제한 없음", "대상 하나에 쓰는 최대 시간"],
+        ["링크 깊이", f"{s['max_hops']}단계", "메뉴에서 링크를 몇 번까지 따라 들어갈지"],
+        ["페이지 간격", f"{s['delay_ms'] / 1000:g}초", "다음 페이지를 열기 전 쉬는 시간 (서버 부담이 걱정되면 늘림)"],
+        ["메뉴 눌러 보기", "켜짐" if s["click_menus"] else "꺼짐", "javascript: 메뉴를 눌러 열리는 화면과 탭까지 확인"],
+        ["메뉴 영역", args.selector or "자동으로 찾기", "메뉴를 못 찾을 때만 CSS 선택자 지정 (예: #topMenu)"],
+        ["추가 호스트", ", ".join(args.extra_host) or "없음", "메뉴가 다른 주소(예: 별도 로그인 서버)로 이어질 때 함께 수집"],
+    ]
+    ui.table([("항목", 14), ("지금 값", 14), ("뜻", 0)], rows, indent="    ")
+
+
+def advanced_settings(args, settings, interactive):
+    """Show what each advanced option means and its value; change only when asked. Enter keeps a value."""
+    if not interactive:
+        return
+    print()
+    print("  고급 설정 " + ui.dim("(보통은 그대로 두면 됩니다)"))
+    show_settings(args, settings)
+    if not ask_yes("  고급 설정을 바꿀까요?", False):
+        return
+    print("  " + ui.dim("Enter = 지금 값 그대로"))
+    settings["max_pages"] = ask_int("    방문 페이지 수 (0 = 제한 없음)", settings["max_pages"], 0, 100000)
+    settings["max_seconds"] = ask_int("    수집 시간, 초 (0 = 제한 없음, 예: 600 = 10분)", settings["max_seconds"], 0, 172800)
+    settings["max_hops"] = ask_int("    링크 깊이 (1~20)", settings["max_hops"], 1, 20)
+    settings["delay_ms"] = ask_int("    페이지 간격, 밀리초 (300 = 0.3초)", settings["delay_ms"], 0, 5000)
+    settings["click_menus"] = ask_yes("    javascript: 메뉴를 눌러 보기", settings["click_menus"])
+    args.selector = ask("    메뉴 영역 CSS 선택자 (없으면 Enter = 자동)", args.selector)
+    hosts = ask("    추가 호스트 (쉼표로 구분, 없으면 Enter)")
+    args.extra_host = args.extra_host + [h.strip() for h in hosts.split(",") if h.strip()]
+    print("  변경한 설정")
+    show_settings(args, settings)
+
+
 def build_config(args):
     title("웹 메뉴 수집기")
     url = ask_url(args.url)
@@ -100,16 +140,8 @@ def build_config(args):
     if mode != "public" and interactive and not login_url:
         login_url = ask("로그인 페이지 주소 (없으면 Enter: 사이트 주소에서 직접 이동)")
 
-    settings = {"max_pages": args.max_pages, "max_seconds": args.max_seconds, "max_hops": args.max_hops,
-                "wait_ms": args.wait_ms, "delay_ms": args.delay_ms}
-    if interactive and ask_yes("고급 설정(방문 페이지 수·시간·간격)을 바꿀까요?"):
-        settings["max_pages"] = ask_int("  최대 방문 페이지 수 (0 = 제한 없음)", settings["max_pages"], 0, 100000)
-        settings["max_seconds"] = ask_int("  최대 수집 시간(초) (0 = 제한 없음)", settings["max_seconds"], 0, 172800)
-        settings["max_hops"] = ask_int("  최대 링크 이동 횟수", settings["max_hops"], 1, 20)
-        settings["delay_ms"] = ask_int("  페이지 간 간격(ms, 서버 부담을 줄이려면 늘리기)", settings["delay_ms"], 0, 5000)
-        hosts = ask("  추가 허용 호스트 (쉼표로 구분, 없으면 Enter)")
-        args.extra_host = args.extra_host + [h.strip() for h in hosts.split(",") if h.strip()]
-        args.selector = ask("  메뉴 영역 CSS 선택자 (없으면 Enter)", args.selector)
+    settings = base_settings(args)
+    advanced_settings(args, settings, interactive)
 
     headless = args.headless and mode == "public"
     if args.headless and mode != "public":
@@ -663,6 +695,7 @@ def parse_args(argv=None):
     p.add_argument("--selector", default="", help="메뉴 영역 CSS 선택자")
     p.add_argument("--browser", choices=["auto", "msedge", "chrome", "chromium"], default="auto")
     p.add_argument("--headless", action="store_true", help="브라우저 창 없이 실행 (로그인 전 수집만)")
+    p.add_argument("--no-click", action="store_true", help="javascript: 메뉴를 눌러 보지 않음")
     p.add_argument("-y", "--yes", action="store_true", help="확인 질문 없이 바로 실행 (점검 권한 확인 완료로 간주)")
     p.add_argument("--no-open", action="store_true", help="저장 후 엑셀을 자동으로 열지 않음")
     p.add_argument("--workbook", default="", help="메뉴를 입력할 진단 엑셀(.xlsx) 경로")
@@ -806,14 +839,8 @@ def campaign(args):
         print("  " + ui.dim("로그인 페이지는 보통 점검 주소에서 바로 이동할 수 있습니다."))
         if ask_yes("  점검 주소와 다른 로그인 페이지 주소를 따로 지정할 대상이 있나요?", False):
             plan = [(t, url, ask(f"    {t.sheet or '진단 시트'} 로그인 주소 (없으면 Enter)")) for t, url, _ in plan]
-    settings = {"max_pages": args.max_pages, "max_seconds": args.max_seconds, "max_hops": args.max_hops,
-                "wait_ms": args.wait_ms, "delay_ms": args.delay_ms}
-    print()
-    if ask_yes("  고급 설정(방문 페이지 수, 시간, 간격)을 바꿀까요?"):
-        settings["max_pages"] = ask_int("    최대 방문 페이지 수 (0 = 제한 없음)", settings["max_pages"], 0, 100000)
-        settings["max_seconds"] = ask_int("    대상별 최대 수집 시간(초) (0 = 제한 없음)", settings["max_seconds"], 0, 172800)
-        settings["delay_ms"] = ask_int("    페이지 간 간격(ms)", settings["delay_ms"], 0, 5000)
-        args.selector = ask("    메뉴 영역 CSS 선택자 (자동으로 못 찾을 때만, 예: #topMenu, 없으면 Enter)", args.selector)
+    settings = base_settings(args)
+    advanced_settings(args, settings, True)
 
     ui.header("작업 순서 확인", board.label)
     print("  접속 확인 중...")

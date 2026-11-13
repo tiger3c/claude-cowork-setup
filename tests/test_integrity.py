@@ -137,3 +137,13 @@ def test_three_digit_and_hidden_sheets(tmp_path):
     wb.save(src)
     names = [t.sheet for t in diag.targets(src)]
     assert "100_세자리" in names and "03_숨김" not in names
+
+
+def test_another_layout_is_refused(tmp_path):
+    src = diagnosis_book(tmp_path / "a.xlsx")
+    wb = load_workbook(src)
+    ws = wb["02_빈시트"]
+    ws["A13"], ws["A14"], ws["A15"] = "메뉴 번호", "1 Depth", "2 Depth"     # rows moved: not this form
+    wb.save(src)
+    with pytest.raises(ValueError, match="양식"):
+        diag.plan(src, "02_빈시트", [["가"]])

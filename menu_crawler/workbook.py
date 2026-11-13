@@ -195,12 +195,23 @@ def menu_keys(grid):
     return keys
 
 
+DEPTH_LABEL = [re.compile(rf"{n}\s*(?:depth|단계|뎁스)", re.I) for n in (1, 2, 3)]
+
+
+def check_layout(wb, sheet, root):
+    """Rows 13~15 must be the 1/2/3 Depth rows of the diagnosis form; refuse to write into another layout."""
+    labels = {ri: clean(wb._value(c) or "") for c, ci, ri in cells(root) if ci == 1 and ri in MENU_ROWS}
+    if not all(DEPTH_LABEL[i].search(labels.get(r, "")) for i, r in enumerate(MENU_ROWS)):
+        raise ValueError(f"'{sheet}' 시트의 13~15행이 1·2·3 Depth 행이 아닙니다. 진단표 양식이 달라 입력하지 않았습니다.")
+
+
 def plan(path, sheet, menus):
     """menus: list of [d1, d2, d3]. Returns which free column each new menu goes to."""
     wb = Workbook(path)
     if sheet not in wb.sheets:
         raise ValueError(f"시트를 찾을 수 없습니다: {sheet}")
     root = wb.root(sheet)
+    check_layout(wb, sheet, root)
     grid = wb.grid(sheet, root)
     used = {col for col, _ in grid}
     existing = menu_keys(grid)

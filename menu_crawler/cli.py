@@ -1052,6 +1052,9 @@ def run_plan(plan, items, mode, settings, board, args):
                 if scope:
                     print("  " + ui.dim(f"같은 호스트에 다른 진단 대상이 있어 {scope} 아래만 수집합니다."))
                 done.append(run_target(idx + 1, len(plan), t, url, login_url, mode, {**settings, "path_prefix": scope}, board, args))
+            except (ValueError, SheetError) as exc:     # e.g. another sheet layout: a clear message, not a crash
+                ui.fail(f"{t.sheet or '진단 시트'}: {exc}")
+                done.append((Filled(t, "실패"), 0, "", url))
             except Exception as exc:  # noqa: BLE001 - one broken target must not stop the others
                 ui.fail(f"{t.sheet or '진단 시트'} 처리 중 오류: {type(exc).__name__}: {exc}")
                 done.append((Filled(t, "실패"), 0, "", url))

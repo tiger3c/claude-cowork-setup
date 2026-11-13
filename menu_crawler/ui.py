@@ -1,5 +1,6 @@
 """Terminal output helpers: colors (Windows 10+ console included), Korean-width tables, step headers."""
 import os
+import re
 import shutil
 import sys
 import unicodedata
@@ -89,7 +90,7 @@ def install_console():
 
 
 def width(text):
-    text = plain(text) if os.name == "nt" else str(text)
+    text = ANSI.sub("", plain(text) if os.name == "nt" else str(text))
     return sum(2 if unicodedata.east_asian_width(ch) in WIDE else 0 if unicodedata.combining(ch) else 1 for ch in str(text))
 
 
@@ -131,9 +132,18 @@ def rule():
     print(dim("  " + "-" * (screen() - 2)))
 
 
+ANSI = re.compile(r"\033\[[0-9;]*m")
+
+
 def say(text, indent="  "):
-    """Print one line cut to the console width."""
-    print(fit(indent + str(text), screen()).rstrip())
+    """Print one line cut to the console width (a colour code around the text is kept whole)."""
+    text = str(text)
+    codes = ANSI.findall(text)
+    body = ANSI.sub("", text)
+    line = fit(indent + body, screen()).rstrip()
+    if codes and _enable():
+        line = line[:len(indent)] + codes[0] + line[len(indent):] + "\033[0m"
+    print(line)
 
 
 def table(columns, rows, indent="  "):

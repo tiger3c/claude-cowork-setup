@@ -250,14 +250,18 @@ def test_auto_mode_logs_in_only_when_the_site_shows_just_a_login_screen(site, tm
 
 def test_needs_login_rules():
     def report(menus, pages=()):
-        return {"menus": menus, "pages": list(pages)}
+        return {"menus": menus, "pages": [{"status": s} for s in pages]}
     def menu(path, evidence="메뉴 DOM", status="수집됨", kind="link"):
         return {"path": path, "evidence": evidence, "status": status, "kind": kind, "ready": status == "수집됨",
-                "hierarchy_review": False, "id": "/".join(path), "url": "", "visibility": ""}
+                "hierarchy_review": False, "id": "/".join(path), "url": "", "visibility": "", "depths": (path + ["", ""])[:3]}
     login_only = report([menu(["Login", "Forgot User ID"], "로그인 화면"), menu(["Login", "Forgot Password"], "로그인 화면")])
     assert cli.needs_login(login_only)
-    public = report([menu(["Login", "Forgot User ID"], "로그인 화면")] + [menu([f"메뉴{i}"]) for i in range(5)])
+    public = report([menu(["Login", "Forgot User ID"], "로그인 화면")] + [menu([f"메뉴{i}"]) for i in range(5)], ["수집됨"] * 6)
     assert not cli.needs_login(public)
+    # every menu leads to a login wall: names are known but nothing is confirmed
+    walls = report([menu([f"메뉴{i}"], status="로그인 필요") for i in range(6)], ["수집됨"] + ["로그인 필요"] * 7)
+    assert cli.needs_login(walls)
+    assert not cli.needs_login(report([], ["접속 실패"]))           # unreachable: logging in would not help
     assert cli.needs_login(report([]))
 
 
@@ -424,3 +428,64 @@ def test_cleanup_check_on_excel_copy(tmp_path, monkeypatch):
     ws = load_workbook(out)["02_빈시트"]
     assert (ws["H13"].value, ws["J13"].value) == (None, None) and (ws["I13"].value, ws["I14"].value) == ("조회", "계좌조회")
     assert book.read_bytes() == before
+
+
+def test_saved_account_is_only_typed_into_the_same_site(monkeypatch):
+    filled = []
+
+    class FakeJob:
+        def command(self, name, **kw):
+            filled.append((name, kw.get("username"), kw.get("password")))
+            return 1
+
+        def wait_done(self, ticket):
+            return {"message": ""}
+    monkeypatch.setattr(cli, "run_command", lambda job, name, **kw: {"message": ""})
+    monkeypatch.setattr(cli.Account, "username", "consultant")
+    monkeypatch.setattr(cli.Account, "password", "pw")
+    monkeypatch.setattr(cli.Account, "site", "client-a.com")
+    from menu_crawler.models import CrawlConfig
+    scripted(monkeypatch, [""])
+    cli.login_step(FakeJob(), CrawlConfig(url="https://www.client-b.com/"))
+    assert filled == []                                          # another client's site: nothing typed
+    scripted(monkeypatch, [""])
+    cli.login_step(FakeJob(), CrawlConfig(url="https://dev.client-a.com/"))
+    assert filled == [("fill", "consultant", "pw")]                 # same site: filled
+    assert cli.site_of("https://u2lusdev.example.co.kr/x") == "example.co.kr"
+
+
+
+def test_account_pin_field_is_not_a_login_screen():
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from menu_crawler.crawler import Crawler
+    from menu_crawler.models import CrawlConfig
+    nav = "<nav><ul>" + "".join(f"<li><a href='/t{i}'>이체{i}</a></li>" for i in range(5)) + "</ul></nav>"
+    pin = "<form><input type=password name=pin placeholder='계좌 비밀번호'><button type=submit>이체</button></form>"
+
+    class Bank(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = f"<html><body>{nav}{'' if self.path == '/' else pin}</body></html>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(body.encode())
+
+        def log_message(self, *a):
+            pass
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Bank)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        engine = Crawler(CrawlConfig(url=f"http://127.0.0.1:{server.server_address[1]}/", mode="login", headless=True,
+                                     browser="chromium", wait_ms=0, delay_ms=0, click_menus=False))
+        engine.open()
+        try:
+            engine.crawl("after")
+            report = engine.snapshot()
+        finally:
+            engine.close()
+        assert not report["session_lost"]
+        assert all(p["status"] == "수집됨" for p in report["pages"])
+        assert not any(m["evidence"] == "로그인 화면" for m in report["menus"])
+    finally:
+        server.shutdown()

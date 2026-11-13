@@ -98,8 +98,19 @@
       records.push({ path, url, label, kind: !url && children ? "group" : !url ? "dynamic" : "link", evidence, hierarchy_review: !nav, mc });
     }
   }
+  // A login form, not just any password field (an account PIN on a transfer page is not a login screen):
+  // a visible password field with an ID-like field next to it and login words around it.
+  const visible = el => Boolean(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+  const loginWords = /(로그인|log\s*-?\s*in|sign\s*-?\s*in|아이디|user\s*id|사용자\s*id|forgot|비밀번호\s*찾기|아이디\s*찾기)/i;
+  const isLoginForm = field => {
+    let box = field.closest("form") || field.parentElement;
+    for (let i = 0; i < 3 && box && !box.querySelector('input:not([type]),input[type="text"],input[type="email"],input[type="tel"]'); i++) box = box.parentElement;
+    if (!box) return false;
+    const idField = [...box.querySelectorAll('input:not([type]),input[type="text"],input[type="email"],input[type="tel"]')].some(visible);
+    return idField && loginWords.test(clean(box.innerText || box.textContent || "") + " " + document.title);
+  };
+  const pw = [...document.querySelectorAll('input[type="password"]')].find(f => visible(f) && isLoginForm(f));
   // Functions of the login box (find ID, reset password, register...): menus of their own for a diagnosis.
-  const pw = document.querySelector('input[type="password"]');
   if (pw) {
     // The login box: the form, widened a few levels while it stays small and holds no menu area.
     const holdsMenu = el => el.matches(navSelector + "," + legacySelector) || el.querySelector(navSelector + "," + legacySelector);
@@ -122,7 +133,7 @@
   }
   return {
     records, breadcrumbs, title: document.title,
-    password: Boolean(document.querySelector('input[type="password"]')),
+    password: Boolean(pw),
     loginText: /(?:로그인(?:이|을|이\s*다시)?\s*(?:필요|해\s*주세요|하십시오)|로그인\s*후\s*(?:이용|접근)|sign\s*in\s*required|please\s*(?:log|sign)\s*in)/i.test(document.body?.innerText || ""),
     unnamed,
   };

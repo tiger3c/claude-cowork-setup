@@ -250,9 +250,19 @@ def crawl(job, phase):
 
 class Account:
     """Login used for this run only. The password, if the user agrees, is kept in memory until the program ends:
-    never in a file, an Excel or a log."""
+    never in a file, an Excel or a log. It is only ever typed into the same site (registrable domain) it came from."""
     username = ""
     password = ""
+    site = ""
+
+
+def site_of(url):
+    host = (urlsplit(url).hostname or "").lower()
+    parts = host.split(".")
+    if host.replace(".", "").isdigit() or len(parts) <= 2:
+        return host
+    # example.co.kr / example.com.au: keep three labels when the second-level label is a generic one
+    return ".".join(parts[-3:]) if parts[-2] in {"co", "or", "go", "ac", "ne", "re", "pe", "com", "net", "org", "gov", "edu"} else ".".join(parts[-2:])
 
 
 def login_step(job, config, username=None):
@@ -268,11 +278,12 @@ def login_step(job, config, username=None):
     print("  " + run_command(job, "goto", url=config.login_url or config.url)["message"])
     if username is not None and not Account.username:
         Account.username = username
-    if Account.username and Account.password:
-        print("  " + ui.dim(f"앞 대상에서 쓴 계정({Account.username})을 입력란에 채웁니다. 로그인 버튼은 직접 누르세요."))
-        autofill(job, Account.username, Account.password)
+    site = site_of(config.login_url or config.url)
+    if Account.username and Account.password and Account.site == site:
+        print("  " + ui.dim(f"같은 사이트({site})에서 쓴 계정({Account.username})을 입력란에 채웁니다. 로그인 버튼은 직접 누르세요."))
+        autofill(job, Account.username, Account.password, site)
     elif username is not None:
-        autofill(job, username)
+        autofill(job, username, site=site)
     while True:
         print()
         print("  [Enter] 로그인 완료 -> 수집 시작")
@@ -287,8 +298,8 @@ def login_step(job, config, username=None):
         if choice in {"p", "ㅔ"}:
             return "public"
         if choice in {"a", "ㅁ"}:
-            Account.username = ask("  아이디", Account.username)
-            autofill(job, Account.username)
+            Account.username = ask("  아이디", Account.username if Account.site == site else "")
+            autofill(job, Account.username, site=site)
         elif choice in {"o", "ㅐ"}:
             print("  " + run_command(job, "goto", url=config.login_url or config.url)["message"])
         elif choice in {"c", "ㅊ"}:
@@ -298,7 +309,7 @@ def login_step(job, config, username=None):
             return False
 
 
-def autofill(job, username, password=None):
+def autofill(job, username, password=None, site=""):
     remembered = password is not None
     if password is None:
         password = getpass.getpass("  비밀번호 (입력 내용은 화면에 표시되지 않음): ")
@@ -307,8 +318,8 @@ def autofill(job, username, password=None):
         return
     ticket = job.command("fill", username=username, password=password)
     print("  " + job.wait_done(ticket)["message"])
-    if not remembered and ask_yes("  다음 대상에도 이 계정을 자동으로 채울까요? (이번 실행 동안 메모리에만 보관)", True):
-        Account.username, Account.password = username, password
+    if not remembered and ask_yes(f"  같은 사이트({site})의 다음 대상에도 이 계정을 채울까요? (이번 실행 동안 메모리에만, 다른 사이트에는 채우지 않음)", True):
+        Account.username, Account.password, Account.site = username, password, site
     del password
 
 
@@ -895,12 +906,19 @@ def engine_mode(mode):
 
 
 def needs_login(data):
-    """True when the public crawl shows (almost) only a login screen: at most one menu besides the login functions."""
-    confirmed, unverified = diag.menus_from_report(data, include_unverified=True)
-    menus = [m for m in diag.tidy(confirmed + [d for d, _ in unverified]) if not diag.LOGIN_NAME.match(m[0])]
-    login_seen = any(p.get("status") in {"로그인 필요", "로그인·권한 확인", "범위 밖 이동"} for p in data.get("pages", [])) \
-        or any(m.get("evidence") == "로그인 화면" for m in data["menus"])
-    return len(menus) == 0 or (login_seen and len(menus) <= 1)
+    """Auto mode: log in when the public crawl shows (almost) only a login wall.
+    - every page failed to open: logging in would not help (unreachable, VPN off) -> False
+    - no confirmed menu besides the login functions -> True
+    - most opened pages (at least two) were login screens -> True"""
+    pages = data.get("pages", [])
+    if pages and all(p.get("status") in {"접속 실패", "화면 읽기 실패"} for p in pages):
+        return False
+    confirmed = [m for m in diag.tidy(diag.menus_from_report(data)[0]) if not diag.LOGIN_NAME.match(m[0])]
+    walls = sum(1 for p in pages if p.get("status") in {"로그인 필요", "로그인·권한 확인", "범위 밖 이동"})
+    login_seen = walls > 0 or any(m.get("evidence") == "로그인 화면" for m in data["menus"])
+    if not confirmed:
+        return login_seen or not data["menus"]
+    return walls >= max(2, 0.6 * len(pages))
 
 
 def run_crawl(config, args, auto=False):

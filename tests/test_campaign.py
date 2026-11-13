@@ -440,6 +440,9 @@ def test_saved_account_is_only_typed_into_the_same_site(monkeypatch):
 
         def wait_done(self, ticket):
             return {"message": ""}
+
+        def snapshot(self):
+            return {"dialogs": []}
     monkeypatch.setattr(cli, "run_command", lambda job, name, **kw: {"message": ""})
     monkeypatch.setattr(cli.Account, "username", "consultant")
     monkeypatch.setattr(cli.Account, "password", "pw")

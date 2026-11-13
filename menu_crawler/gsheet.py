@@ -5,6 +5,7 @@ changes formats, formulas or other cells. The connection (web app URL + 연결 �
 in google_sheet.json next to run.bat (ignored by git).
 """
 import json
+import re
 import os
 import urllib.error
 import urllib.request
@@ -35,14 +36,29 @@ def save_config(url, token):
     return CONFIG
 
 
+SHEET_URL = re.compile(r"^https://docs\.google\.com/spreadsheets/d/([a-zA-Z0-9_-]{20,})")
+
+
+def sheet_ref(text):
+    """A Google Sheets address (or its id) -> the canonical address; '' when it is not one."""
+    text = (text or "").strip().strip('"').strip("'")
+    m = SHEET_URL.match(text)
+    if m:
+        return f"https://docs.google.com/spreadsheets/d/{m.group(1)}/edit"
+    return f"https://docs.google.com/spreadsheets/d/{text}/edit" if re.fullmatch(r"[a-zA-Z0-9_-]{30,}", text) else ""
+
+
 class Client:
-    def __init__(self, url, token, timeout=120):
-        if not url.startswith("https://script.google.com/"):
+    def __init__(self, url, token, timeout=120, spreadsheet=""):
+        url = url.strip()
+        local_test = os.environ.get("MENU_CRAWLER_GSHEET_TEST") and url.startswith("http://127.0.0.1:")
+        if not url.startswith("https://script.google.com/") and not local_test:
             raise SheetError("웹 앱 URL은 https://script.google.com/ 으로 시작해야 합니다. (배포 → 웹 앱 URL)")
-        self.url, self.token, self.timeout = url.strip(), token.strip(), timeout
+        self.url, self.token, self.timeout, self.spreadsheet = url, token.strip(), timeout, spreadsheet
 
     def call(self, action, **payload):
-        body = json.dumps({"action": action, "token": self.token, **payload}, ensure_ascii=False).encode("utf-8")
+        body = json.dumps({"action": action, "token": self.token, "spreadsheet": self.spreadsheet, **payload},
+                          ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(self.url, data=body, headers={"Content-Type": "application/json"}, method="POST")
         try:
             # Apps Script answers POST with a redirect to the result; urllib follows it with GET as required.

@@ -1,7 +1,15 @@
 """The whole interactive flow: work Excel -> targets -> crawl -> fill, driven by scripted answers."""
+import json
 import os
+import shutil
+import subprocess
+import urllib.request
+from pathlib import Path
 
+import pytest
 from openpyxl import load_workbook
+
+from menu_crawler import gsheet
 
 from menu_crawler import cli
 from menu_crawler import workbook as diag
@@ -164,34 +172,63 @@ def test_script_menus_on_a_legacy_english_site_are_filled(tmp_path, monkeypatch)
         server.shutdown()
 
 
-def test_google_sheet_is_the_default_when_connected(site, tmp_path, monkeypatch):  # noqa: F811
-    from menu_crawler import gsheet
-    sheet = {"menus": [["기존 메뉴", "", ""]], "d6": site}
-    calls = []
+BOOK = "1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
 
-    def call(self, action, **payload):
-        calls.append((action, payload.get("dryRun")))
-        if action == "ping":
-            return {"ok": True, "title": "진단표"}
-        if action == "targets":
-            return {"ok": True, "title": "진단표", "targets": [{"sheet": "05_사이트", "name": "사이트", "domain": sheet["d6"],
-                                                             "menus": len(sheet["menus"]), "start": 8 + len(sheet["menus"])}]}
-        have = {tuple(m) for m in sheet["menus"]}
-        write = [m for m in payload["menus"] if tuple(m) not in have]
-        dup = [m for m in payload["menus"] if tuple(m) in have]
-        start = 8 + len(sheet["menus"])
-        if not payload["dryRun"]:
-            sheet["menus"] += write
-        rng = f"{diag.L(start)}13:{diag.L(start + len(write) - 1)}15" if write else ""
-        return {"ok": True, "start": start, "cell": f"{diag.L(start)}13", "range": rng, "existing": len(have),
-                "write": write, "duplicates": dup, "overflow": [], "written": 0 if payload["dryRun"] else len(write)}
 
-    monkeypatch.setattr(gsheet, "load_config", lambda: {"url": "https://script.google.com/macros/s/x/exec", "token": "k"})
-    monkeypatch.setattr(gsheet.Client, "call", call)
-    run(monkeypatch, tmp_path, ["", "05", "", "2", "n", "", "", "", ""])
-    assert ("fill", True) in calls and ("fill", False) in calls
-    assert any(m[0] == "고객센터" for m in sheet["menus"]) and sheet["menus"][0] == ["기존 메뉴", "", ""]
-    assert not list(tmp_path.glob("*_메뉴입력_*.xlsx"))           # no Excel copy in Google mode
+@pytest.fixture()
+def gas(tmp_path, monkeypatch):
+    """apps_script/MenuImport.gs running unchanged in a Google Apps Script stand-in (node)."""
+    if shutil.which("node") is None:
+        pytest.skip("node not installed")
+    def make(sheets):
+        fixture = tmp_path / "gas.json"
+        fixture.write_text(json.dumps({"token": "k", "books": {BOOK: {"name": "진단표", "sheets": sheets}}}, ensure_ascii=False))
+        proc = subprocess.Popen(["node", str(Path(__file__).parent / "js" / "gas_server.js"), str(fixture)],
+                                stdout=subprocess.PIPE, text=True)
+        port = int(proc.stdout.readline().split()[1])
+        procs.append(proc)
+        monkeypatch.setenv("MENU_CRAWLER_GSHEET_TEST", "1")
+        monkeypatch.setattr(gsheet, "load_config", lambda: {"url": f"http://127.0.0.1:{port}/", "token": "k"})
+        state = lambda: json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/__state").read())[BOOK]  # noqa: E731
+        return port, state
+    procs = []
+    yield make
+    for proc in procs:
+        proc.kill()
+
+
+def test_google_sheet_full_flow_and_rerun(site, tmp_path, monkeypatch, gas):  # noqa: F811
+    _, state = gas([
+        {"name": "00_Sample", "cells": {"H13": "예시"}},
+        {"name": "05_사이트", "cells": {"D3": "사이트", "D6": site, "H13": "기존 메뉴", "H20": "양호"},
+         "formulas": {"H16": "=MID(H13,1,9)"}},
+        {"name": "07_숨김", "hidden": True, "cells": {"D6": site}},
+    ])
+    url = f"https://docs.google.com/spreadsheets/d/{BOOK}/edit#gid=0"
+    run(monkeypatch, tmp_path, ["", url, "05", "", "2", "n", "", "", ""])
+    sheet = {s["name"]: s for s in state()}["05_사이트"]
+    cells = sheet["cells"]
+    assert cells["H13"] == "기존 메뉴" and cells["H20"] == "양호"                  # existing data untouched
+    assert "고객센터" in [cells.get(f"{c}13") for c in "IJKLM"]
+    assert all(k[1:] in {"13", "14", "15"} for k in sheet["writes"])               # values only in menu rows
+    assert not sheet["writes"][0].startswith("H")                                  # after the last used column
+    assert {s["name"]: s for s in state()}["07_숨김"]["writes"] == []
+    before = len(sheet["writes"])
+    run(monkeypatch, tmp_path, ["", url, "05", "", "2", "n", "", "", ""])          # rerun = additional investigation
+    assert len({s["name"]: s for s in state()}["05_사이트"]["writes"]) == before     # nothing new
+    assert not list(tmp_path.glob("*_메뉴입력_*.xlsx"))
+
+
+def test_google_sheet_skips_merges_formulas_and_hidden_columns(tmp_path, gas):
+    port, state = gas([{"name": "06_병합", "cells": {"H13": "기존", "I14": "탈퇴"}, "merges": ["H13:I13"],
+                        "formulas": {"J13": "=A1"}, "hiddenCols": ["K"]}])
+    client = gsheet.Client(f"http://127.0.0.1:{port}/", "k", spreadsheet=f"https://docs.google.com/spreadsheets/d/{BOOK}/edit")
+    res = client.fill("06_병합", [["기존", "탈퇴"], ["새1"], ["새2"]])
+    assert res["duplicates"] == [["기존", "탈퇴", ""]] and res["columns"] == [12, 13] and res["range"] == "L13:M15"
+    cells = state()[0]["cells"]
+    assert (cells["L13"], cells["M13"]) == ("새1", "새2") and "K13" not in cells and "J13" not in cells
+    with pytest.raises(gsheet.SheetError):
+        gsheet.Client(f"http://127.0.0.1:{port}/", "wrong", spreadsheet=BOOK).ping()
 
 
 def test_auto_mode_logs_in_only_when_the_site_shows_just_a_login_screen(site, tmp_path, monkeypatch):  # noqa: F811

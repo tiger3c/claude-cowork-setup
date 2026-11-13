@@ -272,3 +272,15 @@ def test_crawl_scope_only_when_a_host_is_shared():
     assert diag.crawl_scope(a, "https://shared.example.com/bank/main.do", items) == "/bank"
     assert diag.crawl_scope(b, "https://shared.example.com/card/", items) == "/card"
     assert diag.crawl_scope(c, "https://alone.example.com/app/x", items) == ""     # alone on its host: whole site
+
+
+def test_sheet_address_forms_and_last_sheet(tmp_path, monkeypatch):
+    from menu_crawler import state
+    ref = gsheet.sheet_ref("https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789/edit?gid=1003960627#gid=1003960627")
+    assert ref == "https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789/edit"
+    assert gsheet.sheet_ref("1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789") == ref
+    assert gsheet.sheet_ref("https://example.com/x") == "" and gsheet.sheet_ref("뉴") == ""
+    monkeypatch.delenv("MENU_CRAWLER_NO_STATE")
+    monkeypatch.setattr(state, "FILE", tmp_path / "last_run.json")
+    state.remember_sheet(ref, "진단표")
+    assert state.last_sheet() == (ref, "진단표")

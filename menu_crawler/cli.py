@@ -411,10 +411,11 @@ def connect_google(interactive, force=False):
     if not interactive:
         sys.exit("구글 시트 연결 정보가 없습니다. 먼저 run.bat --connect-google 로 연결하세요.")
     ui.header("구글 시트 연결", "처음 1회만")
-    print("  1. 진단표 구글 시트 → 확장 프로그램 → Apps Script")
-    print(f"  2. {Path(__file__).resolve().parent.parent / 'apps_script' / 'MenuImport.gs'} 내용을 붙여넣고 저장")
-    print("  3. 함수 setup 실행 → 실행 로그의 '연결 키' 복사")
-    print("  4. 배포 → 새 배포 → 웹 앱 (실행: 나 / 액세스: 모든 사용자) → 웹 앱 URL 복사")
+    print("  1. https://script.google.com -> 새 프로젝트 (진단표마다 할 필요 없이 한 번만)")
+    print(f"  2. {Path(__file__).resolve().parent.parent / 'apps_script' / 'MenuImport.gs'} 내용을 전부 붙여넣고 저장")
+    print("  3. 함수 setup 실행 -> 권한 승인 -> 실행 로그의 '연결 키' 복사")
+    print("  4. 배포 -> 새 배포 -> 웹 앱 (실행: 나 / 액세스: 모든 사용자) -> 웹 앱 URL 복사")
+    print("  " + ui.dim("진단표 구글 시트 주소는 실행할 때마다 묻습니다(Enter = 지난번 시트)."))
     print("  " + ui.dim("자세한 설명: README의 '구글 시트 자동 입력 연결'"))
     while True:
         url = ask("  웹 앱 URL (취소하려면 Enter)")
@@ -423,13 +424,23 @@ def connect_google(interactive, force=False):
         token = ask("  연결 키")
         try:
             client = gsheet.Client(url, token)
-            title_ = client.ping()
+            title_ = verify_connection(client)
         except SheetError as exc:
             ui.fail(str(exc))
             continue
         path = gsheet.save_config(client.url, client.token)
         ui.ok(f"연결했습니다: {title_}  " + ui.dim(f"(연결 정보: {path.name}, 이 PC에만 저장)"))
         return client
+
+
+def verify_connection(client):
+    """The web app answers and the key is right (a sheet address is not needed yet)."""
+    try:
+        return client.ping()
+    except SheetError as exc:
+        if "주소가 필요" in str(exc):          # standalone deployment: fine, the address comes at run time
+            return "연결 확인"
+        raise
 
 
 def choose_board(args, interactive):
@@ -478,14 +489,28 @@ def choose_board(args, interactive):
             if interactive and not args.target:
                 return choose_board(args, interactive)
             return None
+        last, last_title = state.last_sheet()
+        ref = gsheet.sheet_ref(args.sheet_url) if args.sheet_url else ""
+        while not ref:
+            if not interactive:
+                ref = last
+                if not ref:
+                    sys.exit("--sheet-url 로 진단표 구글 시트 주소를 지정하세요.")
+                break
+            hint = f" (Enter = 지난번 시트 '{last_title or last}')" if last else ""
+            raw = ask(f"  진단표 구글 시트 주소{hint}")
+            ref = gsheet.sheet_ref(raw) if raw else last
+            if not ref:
+                print("  구글 시트 주소를 붙여넣으세요. 예: https://docs.google.com/spreadsheets/d/.../edit")
+        client.spreadsheet = ref
         board = SheetsBoard(client)
-        if interactive:
-            print("  구글 시트를 읽는 중입니다...")
-            try:
-                board.cached = board.targets()
-            except SheetError as exc:
-                sys.exit(str(exc))
-            ui.ok(f"구글 시트 '{board.title}' | 진단 시트 {len(board.cached)}개")
+        print("  구글 시트를 읽는 중입니다...")
+        try:
+            board.cached = board.targets()
+        except SheetError as exc:
+            sys.exit(f"구글 시트를 열 수 없습니다: {exc}")
+        state.remember_sheet(ref, board.title)
+        ui.ok(f"구글 시트 '{board.title}' | 진단 시트 {len(board.cached)}개")
         return board
     if kind == "google":
         snapshot = args.snapshot
@@ -645,6 +670,7 @@ def parse_args(argv=None):
     p.add_argument("--workbook-out", default="", help="메뉴를 입력한 진단 엑셀을 저장할 경로 (기본: 원본 옆에 새 파일)")
     p.add_argument("--target", choices=["gsheet", "google", "excel"], help="진단표 기입 방법: gsheet=구글 시트 자동 입력, google=구글 시트 붙여넣기, excel=엑셀 파일 직접 입력")
     p.add_argument("--connect-google", action="store_true", help="구글 시트 자동 입력 연결(웹 앱 URL·연결 키) 설정")
+    p.add_argument("--sheet-url", default="", help="진단표 구글 시트 주소 (구글 시트 자동 입력, 기본: 지난번 시트)")
     p.add_argument("--snapshot", default="", help="구글 시트를 엑셀로 내려받은 파일 (붙여넣을 위치·중복 계산용)")
     p.add_argument("--include-unverified", action="store_true", help="로그인 필요·접속 실패 등으로 확인하지 못한 메뉴도 진단 시트에 입력")
     p.add_argument("--from-result", default="", help="크롤링 없이, 이전에 만든 수집 결과 엑셀의 메뉴를 진단 엑셀에 입력")
@@ -869,6 +895,15 @@ def report(done, board, mode, args, stop=None):
         print("  " + str(board.out.resolve()))
         if os.name == "nt" and not args.no_open and not args.yes and stop is None and ask_yes("  진단 엑셀을 열까요?", True):
             os.startfile(board.out)  # noqa: S606 - Windows only, local file the user just created
+    if isinstance(board, SheetsBoard):
+        if any(f.status == "입력 완료" for f, _, _, _ in done):
+            ui.ok(f"구글 시트 '{board.title}':")
+            print("  " + board.client.spreadsheet)
+            if os.name == "nt" and not args.no_open and not args.yes and stop is None and ask_yes("  구글 시트를 브라우저로 열까요?", True):
+                import webbrowser
+                webbrowser.open(board.client.spreadsheet)
+        else:
+            ui.note("구글 시트에 새로 입력한 메뉴가 없습니다.")
     if any(f.status == "붙여넣기 준비" for f, _, _, _ in done):
         print("  " + ui.dim("붙여넣기 파일과 입력 내역(.tsv)은 결과 폴더에 있습니다."))
 
@@ -936,8 +971,10 @@ def write_log(done, board, mode):
     if not done:
         return None
     workbook = str(board.out.resolve()) if isinstance(board, ExcelBoard) and board.current != board.src else ""
+    if isinstance(board, SheetsBoard):
+        workbook = f"구글 시트 {board.title}: {board.client.spreadsheet}"
     lines = ["\t".join(["진단 시트", "점검 주소", "수집 방식", "수집 메뉴", "기입 결과", "입력", "중복 제외", "칸 부족", "위치",
-                        "메뉴 목록 엑셀", "진단 엑셀"])]
+                        "메뉴 목록 엑셀", "진단표"])]
     for f, n, name, url in done:
         cells = [f.target.sheet, url, MODE_LABELS.get(mode, mode), n, f.status, f.written, f.duplicates, f.overflow, f.where, name,
                  workbook if f.status == "입력 완료" else ""]

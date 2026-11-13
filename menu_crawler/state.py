@@ -29,3 +29,19 @@ def remember_workbook(path):
         FILE.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
     except OSError:
         pass
+
+
+def last_sheet():
+    data = _load()
+    return data.get("sheet", ""), data.get("sheet_title", "")
+
+
+def remember_sheet(url, title=""):
+    if os.environ.get("MENU_CRAWLER_NO_STATE"):
+        return
+    try:
+        data = _load()
+        data["sheet"], data["sheet_title"] = url, title
+        FILE.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    except OSError:
+        pass

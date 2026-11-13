@@ -465,7 +465,8 @@ def menus_from_report(report, include_unverified=False):
 
 
 CONTROL_NAME = re.compile(
-    r"^(?:(?:open|close|view|show|hide)\s+(?:the\s+)?(?:whole|all|full|entire)?\s*menus?|(?:whole|all|full)\s+menu|전체\s*메뉴(?:\s*(?:열기|닫기|보기))?"
+    r"^(?:(?:open|close|view|show|hide)(?:\s*/\s*(?:open|close|hide|show))?\s+(?:the\s+)?(?:whole|all|full|entire)?\s*menus?"
+    r"|(?:whole|all|full)\s+menu(?:\s+(?:open|close))?|menu\s+(?:open|close|toggle)|전체\s*메뉴(?:\s*(?:열기|닫기|보기|열기\s*/\s*닫기))?"
     r"|메뉴\s*(?:열기|닫기|보기|펼치기|접기)|open|close|닫기|열기|skip\b.*|본문\s*바로\s*가기|go\s+to\s+(?:top|content)|top|맨\s*위로|위로"
     r"|prev(?:ious)?|next|이전|다음|more|더\s*보기|menu|메뉴|toggle(?:\s+menu)?)$", re.I)
 LOGIN_NAME = re.compile(r"^(?:log\s*in|sign\s*in|로그인)$", re.I)

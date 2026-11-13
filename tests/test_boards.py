@@ -310,3 +310,8 @@ def test_websquare_screens_are_different_pages():
     assert page_shape(base + "%2Fcontents%2Fcm%2Fmain.xml") != page_shape(base + "%2Fcontents%2Fac%2Finq.xml")
     assert page_shape("https://a.com/m.do?menuId=MNU0000000000123456789AB") != page_shape("https://a.com/m.do?menuId=MNU0000000000123456789AC")
     assert page_shape("https://a.com/x?_csrf=ab12cd34&w2xPath=/a.xml") == page_shape("https://a.com/x?_csrf=ffee0011&w2xPath=/a.xml")
+
+
+def test_screen_controls_with_slashes_are_dropped():
+    kept = diag.tidy([["Open/Close Menu"], ["Whole Menu Open"], ["전체메뉴 열기/닫기"], ["Open Banking"], ["Security Center", "Guide"]])
+    assert kept == [["Open Banking", "", ""], ["Security Center", "Guide", ""]]

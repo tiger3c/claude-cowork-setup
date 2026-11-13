@@ -66,6 +66,22 @@ VOLATILE = re.compile(r"^(?:[0-9a-f]{16,}|[A-Za-z0-9_\-+/=.]{24,}|\d{10,13})$")
 VOLATILE_KEYS = re.compile(r"^(?:_|_?csrf.*|.*xsrf.*|.*token.*|nonce|_?ts|timestamp|_?t|_?rnd|random|_dc|cachebust.*|cb|sid|jsessionid|phpsessid)$", re.I)
 
 
+# Parameters that pick the screen (WebSquare w2xPath, menuNo, pageId...) are never a token.
+SCREEN_KEYS = re.compile(r"(?:path|page|menu|screen|view|scrn|w2x|tab|cmd|act)", re.I)
+
+
+def volatile(key: str, value: str) -> bool:
+    """A token / cache-buster / timestamp: changes on every render and does not pick a different screen."""
+    if VOLATILE_KEYS.match(key):
+        return True
+    if SCREEN_KEYS.search(key) or "/" in value or re.search(r"\.(?:xml|jsp|do|html?|php|aspx?)$", value, re.I):
+        return False
+    if re.fullmatch(r"[0-9a-f]{16,}|\d{10,13}", value, re.I):
+        return True
+    return len(value) >= 24 and bool(re.fullmatch(r"[A-Za-z0-9_\-+=]+", value)) and bool(re.search(r"\d", value)) \
+        and bool(re.search(r"[A-Za-z]", value))
+
+
 def page_shape(url: str) -> str:
     """The same page with only a token / cache-buster / timestamp changed has the same shape.
     Real parameters (menuNo=12, id=3) are kept, so different menus stay different."""
@@ -73,5 +89,5 @@ def page_shape(url: str) -> str:
         p = urlsplit(url)
     except ValueError:
         return url
-    query = sorted((k, "*" if VOLATILE_KEYS.match(k) or VOLATILE.match(v) else v) for k, v in parse_qsl(p.query, keep_blank_values=True))
+    query = sorted((k, "*" if volatile(k, v) else v) for k, v in parse_qsl(p.query, keep_blank_values=True))
     return urlunsplit((p.scheme, p.netloc, p.path, urlencode(query), p.fragment))

@@ -291,25 +291,74 @@ def autofill(job, username, password=None):
     del password
 
 
+STATUS_HELP = {
+    "수집됨": "페이지를 열거나 메뉴를 눌러 확인함",
+    "동작 확인 필요": "주소 없이 스크립트로 움직이는 메뉴인데 눌러서 확인하지 못함 (로그아웃·삭제 같은 이름은 일부러 누르지 않음)",
+    "미방문": "메뉴 목록에는 있지만 열어 보지 못함 (중지·제한, 또는 링크 깊이 초과)",
+    "로그인 필요": "열면 로그인 화면이 나옴. 로그인 후 메뉴도 필요하면 수집 방식 4(전·후 비교)",
+    "로그인·권한 확인": "HTTP 401/403: 로그인이나 권한이 있어야 열림",
+    "접속 실패": "열리지 않음 (HTTP 오류·시간 초과)",
+    "범위 밖": "다른 호스트나 같은 호스트의 다른 서비스라 수집하지 않음",
+    "범위 밖 이동": "열었더니 다른 호스트로 넘어감 (로그인 서버 등이면 고급 설정의 추가 호스트)",
+    "파일 링크": "다운로드 파일이라 열지 않음",
+    "화면 읽기 실패": "열렸지만 메뉴 구조를 읽지 못함",
+}
+ISSUE_HELP = {
+    "이름 없는 링크": ("글자 없이 이미지·아이콘만 있는 링크", "메뉴라면 결과 엑셀 '미수집_확인필요' 시트에서 위치를 확인합니다."),
+    "같은 페이지 반복": ("주소의 토큰·시각 값만 바뀐 같은 화면이 반복됨", "서로 다른 화면인데 이렇게 나오면 알려 주세요."),
+    "로그인 필요": ("로그인 화면이 감지된 주소", "로그인 후 메뉴가 필요하면 수집 방식 4(전·후 비교)로 다시 수집합니다."),
+    "로그인·권한 확인": ("401/403 응답", "권한이 있는 계정으로 로그인 후 수집합니다."),
+    "접속 실패": ("열리지 않은 주소", "주소·VPN·사내망을 확인합니다."),
+    "범위 밖 이동": ("다른 호스트로 넘어간 주소", "필요하면 고급 설정의 추가 호스트에 넣습니다."),
+    "경로 범위 밖": ("같은 호스트의 다른 서비스 주소", "다른 진단 시트의 대상이라 이 시트에는 넣지 않았습니다."),
+    "탐색 이동 제한": ("링크 깊이 제한으로 열지 않은 주소", "필요하면 고급 설정의 링크 깊이를 늘립니다."),
+    "수집 미완료": ("중지·제한으로 끝까지 확인하지 못함", "다시 수집하거나 고급 설정의 제한을 늘립니다."),
+    "동적 메뉴 확인": ("마우스를 올려도 열리지 않은 메뉴", "로그인 단계에서 메뉴를 직접 열고 c(현재 화면 추가)를 누릅니다."),
+    "시작 페이지 접속 실패": ("시작 주소가 열리지 않음", "주소·VPN·사내망을 확인합니다."),
+    "로그인 상태 확인": ("로그인 후에도 비밀번호 칸이 보임", "로그인이 끝났는지 확인하고 다시 수집합니다."),
+    "프레임 범위 밖": ("다른 호스트의 프레임", "필요하면 고급 설정의 추가 호스트에 넣습니다."),
+    "화면 읽기 실패": ("화면을 읽지 못함", "메뉴 영역 CSS 선택자를 지정해 다시 수집합니다."),
+}
+
+
 def summary(data):
     title("수집 결과")
     menus = data["menus"]
     ready = sum(m["ready"] for m in menus)
-    print(f"  발견 메뉴 {len(menus)}개 · 확인된 메뉴 {ready}개 · 방문 페이지 {data['visited_count']}개")
-    for status, count in Counter(m["status"] for m in menus).most_common():
-        print(f"    - {status}: {count}")
+    clicked = sum(1 for m in menus if "눌러" in (m.get("reason") or ""))
+    print(f"  발견 메뉴 {len(menus)}개 | 확인된 메뉴 {ready}개 | 방문 페이지 {data['visited_count']}개"
+          + (f" | 눌러서 확인 {clicked}개" if clicked else ""))
     vis = Counter(m["visibility"] for m in menus if m.get("visibility"))
-    if vis:
-        print(f"  로그인 전 공개 {vis['로그인 전 공개']}개 · 로그인 후 전용 {vis['로그인 후 전용']}개")
+    if vis and vis["로그인 후 전용"]:
+        print(f"  로그인 전 공개 {vis['로그인 전 공개']}개 | 로그인 후 전용 {vis['로그인 후 전용']}개")
+    print()
+    print("  상태별 메뉴")
+    by_status = {}
+    for m in menus:
+        if m["kind"] != "group":
+            by_status.setdefault(m["status"], []).append(" > ".join(m["path"][:3]))
+    for status, names in sorted(by_status.items(), key=lambda x: (x[0] != "수집됨", -len(x[1]))):
+        print(f"    - {status} {len(names)}개: " + ui.dim(STATUS_HELP.get(status, "")))
+        if status != "수집됨":
+            shown = " | ".join(names[:5]) + (f"  ... 외 {len(names) - 5}개" if len(names) > 5 else "")
+            ui.say(ui.dim(shown), indent="        ")
     open_issues = [x for x in data["issues"] if not x.get("resolved")]
     if open_issues:
-        print(f"  확인 필요 {len(open_issues)}건 (엑셀 '미수집_확인필요' 시트 참고)")
-        for item in open_issues[:5]:
-            print(f"    - [{item['phase']}] {item['kind']}: {item['url']}"[:110])
-        if len(open_issues) > 5:
-            print(f"    ... 외 {len(open_issues) - 5}건")
+        print()
+        print(f"  확인 필요 {len(open_issues)}건 " + ui.dim("(결과 엑셀 '미수집_확인필요' 시트에 전체 목록)"))
+        groups = {}
+        for item in open_issues:
+            groups.setdefault(item["kind"], []).append(item)
+        for kind, items in sorted(groups.items(), key=lambda x: -len(x[1])):
+            meaning, todo = ISSUE_HELP.get(kind, (items[0].get("reason", ""), ""))
+            print(f"    - {kind} {len(items)}건: " + ui.dim(meaning))
+            if todo:
+                print("        " + ui.dim("할 일: " + todo))
+            for url in list(dict.fromkeys(x["url"] for x in items if x.get("url")))[:3]:
+                ui.say(ui.dim(url), indent="        ")
     if data["limit_reached"]:
-        print("  ⚠ 수집 제한(페이지 수·시간·중지)에 도달했습니다. 필요하면 고급 설정을 늘려 다시 실행하세요.")
+        print()
+        print("  ⚠ 수집이 끝까지 가지 못했습니다(중지 또는 제한). 필요하면 다시 수집하거나 고급 설정을 늘리세요.")
     tree(menus)
 
 

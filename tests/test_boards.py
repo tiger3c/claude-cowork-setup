@@ -302,3 +302,11 @@ def test_connections_saved_per_account_and_sheet_bound_to_one(tmp_path, monkeypa
     assert cli.pick_connection(team, True)["name"] == "회사 계정"        # asked once
     assert cli.pick_connection(team, True)["name"] == "회사 계정"        # remembered, not asked again
     assert len(gsheet.remove_connection(1)) == 1
+
+
+def test_websquare_screens_are_different_pages():
+    from menu_crawler.urls import page_shape
+    base = "https://h.example.com/websquare/websquare.jsp?w2xPath="
+    assert page_shape(base + "%2Fcontents%2Fcm%2Fmain.xml") != page_shape(base + "%2Fcontents%2Fac%2Finq.xml")
+    assert page_shape("https://a.com/m.do?menuId=MNU0000000000123456789AB") != page_shape("https://a.com/m.do?menuId=MNU0000000000123456789AC")
+    assert page_shape("https://a.com/x?_csrf=ab12cd34&w2xPath=/a.xml") == page_shape("https://a.com/x?_csrf=ffee0011&w2xPath=/a.xml")

@@ -20,20 +20,48 @@ class SheetError(Exception):
     pass
 
 
-def load_config():
+def _env():
     url, token = os.environ.get("MENU_CRAWLER_GSHEET_URL", ""), os.environ.get("MENU_CRAWLER_GSHEET_TOKEN", "")
-    if url and token:
-        return {"url": url, "token": token}
+    return {"name": "환경 변수", "url": url, "token": token} if url and token else None
+
+
+def file_connections():
+    """Saved connections, one per Google account that deployed the web app (e.g. personal, company)."""
     try:
         data = json.loads(CONFIG.read_text(encoding="utf-8"))
-        return data if data.get("url") and data.get("token") else None
     except (OSError, ValueError):
-        return None
+        return []
+    if isinstance(data, dict) and isinstance(data.get("connections"), list):
+        return [c for c in data["connections"] if isinstance(c, dict) and c.get("url") and c.get("token")]
+    if isinstance(data, dict) and data.get("url") and data.get("token"):          # older single-connection file
+        return [{"name": "연결 1", "url": data["url"], "token": data["token"]}]
+    return []
 
 
-def save_config(url, token):
-    CONFIG.write_text(json.dumps({"url": url, "token": token}, ensure_ascii=False, indent=1), encoding="utf-8")
+def connections():
+    env = _env()
+    return [env] if env else file_connections()
+
+
+def load_config():
+    found = connections()
+    return found[0] if found else None
+
+
+def save_config(url, token, name=""):
+    """Add a connection (a connection with the same web app URL is replaced)."""
+    keep = [c for c in file_connections() if c["url"] != url]
+    keep.append({"name": name or f"연결 {len(keep) + 1}", "url": url, "token": token})
+    CONFIG.write_text(json.dumps({"connections": keep}, ensure_ascii=False, indent=1), encoding="utf-8")
     return CONFIG
+
+
+def remove_connection(index):
+    keep = file_connections()
+    if 0 <= index < len(keep):
+        keep.pop(index)
+        CONFIG.write_text(json.dumps({"connections": keep}, ensure_ascii=False, indent=1), encoding="utf-8")
+    return keep
 
 
 SHEET_URL = re.compile(r"^https://docs\.google\.com/spreadsheets/d/([a-zA-Z0-9_-]{20,})")
@@ -49,12 +77,12 @@ def sheet_ref(text):
 
 
 class Client:
-    def __init__(self, url, token, timeout=120, spreadsheet=""):
+    def __init__(self, url, token, timeout=120, spreadsheet="", name=""):
         url = url.strip()
         local_test = os.environ.get("MENU_CRAWLER_GSHEET_TEST") and url.startswith("http://127.0.0.1:")
         if not url.startswith("https://script.google.com/") and not local_test:
             raise SheetError("웹 앱 URL은 https://script.google.com/ 으로 시작해야 합니다. (배포 → 웹 앱 URL)")
-        self.url, self.token, self.timeout, self.spreadsheet = url, token.strip(), timeout, spreadsheet
+        self.url, self.token, self.timeout, self.spreadsheet, self.name = url, token.strip(), timeout, spreadsheet, name
 
     def call(self, action, **payload):
         body = json.dumps({"action": action, "token": self.token, "spreadsheet": self.spreadsheet, **payload},

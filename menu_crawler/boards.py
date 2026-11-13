@@ -59,7 +59,7 @@ class SheetsBoard:
             items, self.cached = self.cached, None
             return items
         self.title, items = self.client.targets()
-        self.label = f"구글 시트 자동 입력 · {self.title}"
+        self.label = f"구글 시트 자동 입력 · {self.title}" + (f" ({self.client.name})" if self.client.name else "")
         return items
 
     def fill(self, target, menus, interactive, out_dir):

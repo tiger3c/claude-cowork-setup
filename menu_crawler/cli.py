@@ -435,20 +435,34 @@ def powershell_clipboard(text):
 BOARD_KEYS = {"1": "gsheet", "2": "google", "3": "excel", "4": None}
 
 
+def all_connections():
+    found = gsheet.connections()
+    return found or [c for c in [gsheet.load_config()] if c]
+
+
 def connect_google(interactive, force=False):
-    """Client for the Google Sheet web app; asks for the connection once and keeps it on this PC."""
-    cfg = None if force else gsheet.load_config()
-    if cfg:
-        return gsheet.Client(cfg["url"], cfg["token"])
+    """A saved connection, or set one up. --connect-google (force) adds another account's connection."""
+    found = all_connections()
+    if found and not force:
+        return gsheet.Client(found[0]["url"], found[0]["token"], name=found[0].get("name", ""))
     if not interactive:
         sys.exit("구글 시트 연결 정보가 없습니다. 먼저 run.bat --connect-google 로 연결하세요.")
-    ui.header("구글 시트 연결", "처음 1회만")
-    print("  1. https://script.google.com -> 새 프로젝트 (진단표마다 할 필요 없이 한 번만)")
+    ui.header("구글 시트 연결", "계정마다 한 번")
+    saved = gsheet.file_connections()
+    if saved:
+        print("  저장된 연결")
+        for i, conn in enumerate(saved, 1):
+            print(f"    {i}) {conn.get('name', '')}  " + ui.dim(conn["url"][:60] + "..."))
+        choice = ask("  Enter = 새 연결 추가 | 번호 앞에 d = 그 연결 삭제 (예: d1)").strip().lower()
+        if choice.startswith("d") and choice[1:].isdigit():
+            left = gsheet.remove_connection(int(choice[1:]) - 1)
+            ui.ok(f"삭제했습니다. 남은 연결 {len(left)}개")
+            return None
+    print("  1. https://script.google.com -> 새 프로젝트 (그 계정으로 로그인한 상태에서, 계정마다 한 번만)")
     print(f"  2. {Path(__file__).resolve().parent.parent / 'apps_script' / 'MenuImport.gs'} 내용을 전부 붙여넣고 저장")
-    print("  3. 함수 setup 실행 -> 권한 승인 -> 실행 로그의 '연결 키' 복사")
+    print("  3. 함수 setup 실행 -> 권한 승인 -> 실행 로그의 '연결 키' 복사 (또는 프로젝트 설정 -> 스크립트 속성 TOKEN)")
     print("  4. 배포 -> 새 배포 -> 웹 앱 (실행: 나 / 액세스: 모든 사용자) -> 웹 앱 URL 복사")
-    print("  " + ui.dim("진단표 구글 시트 주소는 실행할 때마다 묻습니다(Enter = 지난번 시트)."))
-    print("  " + ui.dim("자세한 설명: README의 '구글 시트 자동 입력 연결'"))
+    print("  " + ui.dim("진단표 구글 시트 주소는 실행할 때마다 묻고, 그 시트를 열 수 있는 연결을 자동으로 씁니다."))
     while True:
         url = ask("  웹 앱 URL (취소하려면 Enter)")
         if not url:
@@ -460,9 +474,49 @@ def connect_google(interactive, force=False):
         except SheetError as exc:
             ui.fail(str(exc))
             continue
-        path = gsheet.save_config(client.url, client.token)
-        ui.ok(f"연결했습니다: {title_}  " + ui.dim(f"(연결 정보: {path.name}, 이 PC에만 저장)"))
+        name = ask("  이 연결의 이름 (예: 개인 계정, 회사 계정)", f"연결 {len(saved) + 1}")
+        path = gsheet.save_config(client.url, client.token, name)
+        client.name = name
+        ui.ok(f"연결했습니다: {name} ({title_})  " + ui.dim(f"연결 정보: {path.name}, 이 PC에만 저장"))
         return client
+
+
+def pick_connection(ref, interactive):
+    """The one connection (Google account) used for this sheet: remembered per sheet, asked the first time.
+    Other accounts are never tried on a sheet, so a sheet is only written through the account chosen for it."""
+    conns = all_connections()
+    if len(conns) == 1:
+        return conns[0]
+    remembered = state.sheet_connection(ref)
+    hit = next((c for c in conns if c["url"] == remembered), None)
+    if hit:
+        return hit
+    if not interactive:
+        sys.exit("이 시트에 쓸 구글 연결을 정하지 않았습니다. 한 번 대화형으로 실행해 연결을 고르세요.")
+    print("  이 시트에 쓸 구글 연결(계정)을 고르세요. " + ui.dim("고른 연결로만 이 시트에 씁니다. 다음부터는 묻지 않습니다."))
+    for i, conn in enumerate(conns, 1):
+        print(f"    {i}) {conn.get('name', '') or f'연결 {i}'}")
+    while True:
+        pick = ask("  번호", "1")
+        if pick.isdigit() and 1 <= int(pick) <= len(conns):
+            state.remember_sheet_connection(ref, conns[int(pick) - 1]["url"])
+            return conns[int(pick) - 1]
+        print(f"  1~{len(conns)} 중에서 고르세요.")
+
+
+def open_sheet(client, ref, interactive):
+    conn = pick_connection(ref, interactive)
+    client = gsheet.Client(conn["url"], conn["token"], spreadsheet=ref, name=conn.get("name", ""))
+    print("  구글 시트를 읽는 중입니다..." + (ui.dim(f"  (연결: {client.name})") if client.name else ""))
+    board = SheetsBoard(client)
+    try:
+        board.cached = board.targets()
+    except SheetError as exc:
+        ui.fail(f"{client.name or '연결'}: {exc}")
+        ui.note("이 연결의 계정이 이 시트를 편집할 수 없습니다. 다른 연결로 쓰려면 run.bat --connect-google 에서 연결을 정리하세요.")
+        state.remember_sheet_connection(ref, "")
+        return None
+    return board
 
 
 def verify_connection(client):
@@ -483,7 +537,7 @@ def choose_board(args, interactive):
         if not interactive:
             kind = "google"
         else:
-            linked = gsheet.load_config() is not None
+            linked = bool(all_connections())
             last = "" if linked else state.last_workbook()
             if linked:
                 print("  " + ui.bold("Enter = 구글 시트에 바로 입력") + ui.dim("  (연결된 진단표, 값만 입력)"))
@@ -534,13 +588,13 @@ def choose_board(args, interactive):
             ref = gsheet.sheet_ref(raw) if raw else last
             if not ref:
                 print("  구글 시트 주소를 붙여넣으세요. 예: https://docs.google.com/spreadsheets/d/.../edit")
-        client.spreadsheet = ref
-        board = SheetsBoard(client)
-        print("  구글 시트를 읽는 중입니다...")
-        try:
-            board.cached = board.targets()
-        except SheetError as exc:
-            sys.exit(f"구글 시트를 열 수 없습니다: {exc}")
+        board = open_sheet(client, ref, interactive)
+        if board is None:
+            if interactive:
+                args.sheet_url = ""
+                state.remember_sheet("", "")
+                return choose_board(args, interactive)
+            sys.exit("구글 시트를 열 수 없습니다.")
         state.remember_sheet(ref, board.title)
         ui.ok(f"구글 시트 '{board.title}' | 진단 시트 {len(board.cached)}개")
         return board

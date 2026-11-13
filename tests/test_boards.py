@@ -284,3 +284,21 @@ def test_sheet_address_forms_and_last_sheet(tmp_path, monkeypatch):
     monkeypatch.setattr(state, "FILE", tmp_path / "last_run.json")
     state.remember_sheet(ref, "진단표")
     assert state.last_sheet() == (ref, "진단표")
+
+
+def test_connections_saved_per_account_and_sheet_bound_to_one(tmp_path, monkeypatch):
+    from menu_crawler import cli, state
+    monkeypatch.setattr(gsheet, "CONFIG", tmp_path / "google_sheet.json")
+    monkeypatch.delenv("MENU_CRAWLER_NO_STATE")
+    monkeypatch.setattr(state, "FILE", tmp_path / "last_run.json")
+    (tmp_path / "google_sheet.json").write_text('{"url": "https://script.google.com/a", "token": "old"}')   # old format
+    assert [c["name"] for c in gsheet.connections()] == ["연결 1"]
+    gsheet.save_config("https://script.google.com/b", "k2", "회사 계정")
+    gsheet.save_config("https://script.google.com/a", "k1", "개인 계정")                                  # replaces same URL
+    assert [(c["name"], c["token"]) for c in gsheet.connections()] == [("회사 계정", "k2"), ("개인 계정", "k1")]
+    team = "https://docs.google.com/spreadsheets/d/TEAMTEAMTEAMTEAMTEAMTEAMTEAM12/edit"
+    answers = iter(["1"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    assert cli.pick_connection(team, True)["name"] == "회사 계정"        # asked once
+    assert cli.pick_connection(team, True)["name"] == "회사 계정"        # remembered, not asked again
+    assert len(gsheet.remove_connection(1)) == 1

@@ -45,3 +45,22 @@ def remember_sheet(url, title=""):
         FILE.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
     except OSError:
         pass
+
+
+def sheet_connection(sheet):
+    return _load().get("sheet_connections", {}).get(sheet, "")
+
+
+def remember_sheet_connection(sheet, connection_url):
+    if os.environ.get("MENU_CRAWLER_NO_STATE"):
+        return
+    try:
+        data = _load()
+        links = data.setdefault("sheet_connections", {})
+        if connection_url:
+            links[sheet] = connection_url
+        else:
+            links.pop(sheet, None)
+        FILE.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    except OSError:
+        pass

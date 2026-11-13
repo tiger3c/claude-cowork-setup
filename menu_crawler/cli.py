@@ -30,8 +30,10 @@ from .export import make_workbook, select_menus
 from .models import MODES, CrawlConfig
 
 BUSY = {"starting", "crawling", "capturing"}
-MODE_KEYS = {"1": "public", "2": "login", "3": "compare"}
+MODE_KEYS = {"1": "auto", "2": "public", "3": "login", "4": "compare"}
+MODE_LABELS = {"auto": "자동 (필요할 때만 로그인)", **MODES}
 MODE_HELP = {
+    "auto": "로그인 없이 먼저 수집하고, 로그인 화면만 보이는 대상은 그때 로그인한 뒤 수집",
     "public": "로그인하지 않은 방문자에게 보이는 공개 메뉴만 수집",
     "login": "브라우저 창에서 직접 로그인한 뒤 로그인 상태의 메뉴를 수집",
     "compare": "공개 메뉴 수집 → 로그인 → 다시 수집해 '로그인 후에만 보이는 메뉴'를 구분",
@@ -78,12 +80,12 @@ def ask_mode(initial, default="1"):
     print()
     print("  수집 방식을 선택하세요.")
     for key, mode in MODE_KEYS.items():
-        print(f"    {key}) {ui.fit(MODES[mode], 22)} - {MODE_HELP[mode]}")
+        print(f"    {key}) {ui.fit(MODE_LABELS[mode], 26)} - {MODE_HELP[mode]}")
     while True:
         value = ask("  번호", default)
         if value in MODE_KEYS:
             return MODE_KEYS[value]
-        print("  1, 2, 3 중에서 선택하세요.")
+        print("  1~4 중에서 선택하세요.")
 
 
 def build_config(args):
@@ -111,10 +113,11 @@ def build_config(args):
 
     headless = args.headless and mode == "public"
     if args.headless and mode != "public":
-        print("  ※ 로그인이 필요한 방식이라 브라우저 창을 띄워서 실행합니다.")
+        print("  ※ 로그인할 수 있는 방식이라 브라우저 창을 띄워서 실행합니다.")
+    args.auto_login = mode == "auto"
 
     try:
-        config = CrawlConfig(url=url, mode=mode, site_name=name[:120], login_url=login_url, extra_hosts=args.extra_host,
+        config = CrawlConfig(url=url, mode=engine_mode(mode), site_name=name[:120], login_url=login_url, extra_hosts=args.extra_host,
                              browser=args.browser, menu_selector=args.selector, headless=headless, **settings)
     except ValidationError as exc:
         sys.exit("입력값 오류: " + "; ".join(e["msg"] for e in exc.errors()))
@@ -123,7 +126,7 @@ def build_config(args):
     line()
     print(f"  대상       : {config.site_name}")
     print(f"  사이트 주소: {config.url}")
-    print(f"  수집 방식  : {MODES[config.mode]}")
+    print(f"  수집 방식  : {MODE_LABELS['auto' if args.auto_login else config.mode]}")
     if config.mode != "public":
         print(f"  로그인 주소: {config.login_url or '(사이트 주소에서 직접 이동)'}")
     print(f"  제한       : {limits(config.max_pages, config.max_seconds)} · 이동 {config.max_hops}회")
@@ -620,7 +623,8 @@ def fill_step(menus, args, interactive, out_dir, url=""):
 def parse_args(argv=None):
     p = argparse.ArgumentParser(prog="메뉴수집", description="웹사이트 메뉴를 1·2·3 Depth로 수집해 엑셀로 정리합니다. 옵션 없이 실행하면 하나씩 물어봅니다.")
     p.add_argument("url", nargs="?", help="수집할 사이트 주소")
-    p.add_argument("--mode", choices=["public", "login", "compare"], help="public=로그인 전, login=로그인 후, compare=전·후 비교")
+    p.add_argument("--mode", choices=["auto", "public", "login", "compare"],
+                   help="auto=필요할 때만 로그인(기본), public=로그인 전, login=로그인 후, compare=전·후 비교")
     p.add_argument("--login-url", default="", help="로그인 페이지 주소")
     p.add_argument("--name", default="", help="대상 이름")
     p.add_argument("--out", default="", help="저장할 엑셀 파일 경로 (기본: 결과 폴더)")
@@ -681,7 +685,21 @@ def choose_menus(confirmed, unverified, args, interactive):
 
 
 
-def run_crawl(config, args):
+def engine_mode(mode):
+    """'auto' runs as before/after comparison; the login part is skipped when the public crawl is enough."""
+    return "compare" if mode == "auto" else mode
+
+
+def needs_login(data):
+    """True when the public crawl shows (almost) only a login screen: at most one menu besides the login functions."""
+    confirmed, unverified = diag.menus_from_report(data, include_unverified=True)
+    menus = [m for m in diag.tidy(confirmed + [d for d, _ in unverified]) if not diag.LOGIN_NAME.match(m[0])]
+    login_seen = any(p.get("status") in {"로그인 필요", "로그인·권한 확인", "범위 밖 이동"} for p in data.get("pages", [])) \
+        or any(m.get("evidence") == "로그인 화면" for m in data["menus"])
+    return len(menus) == 0 or (login_seen and len(menus) <= 1)
+
+
+def run_crawl(config, args, auto=False):
     """Open the browser, crawl (with the login step when needed) and close it. -> (data or None, error or None)."""
     print("  브라우저를 여는 중입니다...")
     job = Job(config)
@@ -695,6 +713,11 @@ def run_crawl(config, args):
             if config.mode == "compare":
                 print("\n  [1단계] 로그인 전 공개 메뉴 수집")
             data = crawl(job, "before")
+        if auto and config.mode == "compare" and not job.stop.is_set():
+            if not needs_login(data):
+                print("  공개 메뉴가 보여 로그인 없이 마칩니다. " + ui.dim("(로그인 후 메뉴까지 필요하면 수집 방식 4)"))
+                return data, None
+            print("  " + ui.bold("로그인 화면만 보입니다. 로그인한 뒤 메뉴를 수집합니다."))
         if config.mode in {"login", "compare"} and not job.stop.is_set():
             if login_step(job, config, args.username):
                 print("\n  [로그인 후] 메뉴 수집")
@@ -728,8 +751,8 @@ def finish(data, args):
 
 def single_run(args):
     config = build_config(args)
-    title(MODES[config.mode])
-    data, error = run_crawl(config, args)
+    title(MODE_LABELS["auto" if getattr(args, "auto_login", False) else config.mode])
+    data, error = run_crawl(config, args, auto=getattr(args, "auto_login", False))
     if data is None:
         if isinstance(error, EngineError):
             sys.exit(1)
@@ -751,7 +774,7 @@ def campaign(args):
     ui.step(2, 3, "진단 대상")
     plan = pick_plan(board, args, items)
     ui.step(3, 3, "수집 방식 (모든 대상 공통)")
-    mode = ask_mode(args.mode, default="2")
+    mode = ask_mode(args.mode, default="1")
     if mode != "public":
         print()
         print("  " + ui.dim("로그인 페이지는 보통 점검 주소에서 바로 이동할 수 있습니다."))
@@ -777,7 +800,7 @@ def campaign(args):
     if any(t.menus for t, _, _ in plan):
         print("  " + ui.dim("기존 메뉴가 있는 시트는 이미 있는 메뉴를 건너뛰고 새 메뉴만 이어서 넣습니다."))
     print()
-    print(f"  수집 방식: {MODES[mode]} | {limits(settings['max_pages'], settings['max_seconds'])}")
+    print(f"  수집 방식: {MODE_LABELS[mode]} | {limits(settings['max_pages'], settings['max_seconds'])}")
     print("  " + ui.dim("메뉴를 모두 확인하면 자동으로 끝납니다. 중간에 멈추려면 q (그때까지 결과는 저장)"))
     if mode != "public":
         print("  " + ui.dim("대상마다 브라우저 창이 열리면 직접 로그인한 뒤 이 창에서 Enter를 누릅니다."))
@@ -916,7 +939,7 @@ def write_log(done, board, mode):
     lines = ["\t".join(["진단 시트", "점검 주소", "수집 방식", "수집 메뉴", "기입 결과", "입력", "중복 제외", "칸 부족", "위치",
                         "메뉴 목록 엑셀", "진단 엑셀"])]
     for f, n, name, url in done:
-        cells = [f.target.sheet, url, MODES.get(mode, mode), n, f.status, f.written, f.duplicates, f.overflow, f.where, name,
+        cells = [f.target.sheet, url, MODE_LABELS.get(mode, mode), n, f.status, f.written, f.duplicates, f.overflow, f.where, name,
                  workbook if f.status == "입력 완료" else ""]
         lines.append("\t".join(" ".join(str(x).split()) for x in cells))
     path = Path("결과") / f"작업기록_{datetime.now():%Y%m%d_%H%M%S}.tsv"
@@ -1071,13 +1094,13 @@ def run_target(i, total, t, url, login_url, mode, settings, board, args):
     """One 진단 대상: crawl -> save the menu list -> fill the 진단 시트. -> (Filled, menus, result file, url)."""
     ui.header(f"[{i}/{total}] {t.name or t.sheet}", f"{t.sheet}  {url}")
     try:
-        config = CrawlConfig(url=url, mode=mode, site_name=(t.name or t.sheet or urlsplit(url).hostname or "메뉴 수집")[:120],
+        config = CrawlConfig(url=url, mode=engine_mode(mode), site_name=(t.name or t.sheet or urlsplit(url).hostname or "메뉴 수집")[:120],
                              login_url=login_url, extra_hosts=args.extra_host, browser=args.browser,
-                             menu_selector=args.selector, headless=args.headless and mode == "public", **settings)
+                             menu_selector=args.selector, headless=args.headless and mode in {"public", "auto"}, **settings)
     except ValidationError as exc:
         ui.fail("입력값 오류: " + "; ".join(e["msg"] for e in exc.errors()))
         return Filled(t, "실패"), 0, "", url
-    data, error = run_crawl(config, args)
+    data, error = run_crawl(config, args, auto=mode == "auto")
     if data is None:
         ui.fail("수집한 메뉴가 없습니다.")
         return Filled(t, "수집 실패"), 0, "", url
@@ -1086,8 +1109,7 @@ def run_target(i, total, t, url, login_url, mode, settings, board, args):
     print()
     ui.ok(f"메뉴 목록 엑셀: {path.name}")
     print("  " + ui.dim(str(path.parent)))
-    reached = [p for p in data.get("pages", []) if p.get("status") == "수집됨"]
-    if not data["menus"] or (data.get("pages") and not reached and not any(m.get("ready") for m in data["menus"])):
+    if not data["menus"]:
         why = next((p.get("reason") or p.get("status") for p in data.get("pages", []) if p.get("status") != "수집됨"), "")
         ui.fail("메뉴를 수집하지 못해 기입하지 않았습니다." + (f" 사유: {why}" if why else " 주소와 접속(VPN, 사내망)을 확인하세요."))
         return Filled(t, "수집 실패"), 0, path.name, url

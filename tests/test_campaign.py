@@ -11,12 +11,15 @@ from test_modes import site  # noqa: F401 - pytest fixture
 
 
 def scripted(monkeypatch, answers):
-    it = iter(answers)
+    it = iter(list(answers) + [""] * 6)          # a few spare Enters, then the input closes
     asked = []
 
     def fake(prompt=""):
         asked.append(prompt)
-        return next(it)
+        try:
+            return next(it)
+        except StopIteration:
+            raise EOFError from None
     monkeypatch.setattr("builtins.input", fake)
     return asked
 
@@ -36,7 +39,7 @@ def test_numbers_dedupe_crawl_fill_and_rerun_adds_nothing(site, tmp_path, monkey
     wb["02_빈시트"]["D6"] = site                 # 02 -> local site; 01 keeps www.example.com (never crawled)
     wb.save(book)
     before = book.read_bytes()
-    run(monkeypatch, tmp_path, [str(book), "2, 02", "", "1", "n", "", ""])
+    run(monkeypatch, tmp_path, [str(book), "2, 02", "", "2", "n", "", ""])
     out = next(tmp_path.glob("작업_메뉴입력_*[0-9].xlsx"))
     assert book.read_bytes() == before
     ws = load_workbook(out)["02_빈시트"]
@@ -47,7 +50,7 @@ def test_numbers_dedupe_crawl_fill_and_rerun_adds_nothing(site, tmp_path, monkey
     # additional investigation on the filled copy: nothing new, no new file
     for f in tmp_path.glob("작업_메뉴입력_*"):
         os.utime(f)
-    run(monkeypatch, tmp_path, [str(out), "02", "", "1", "n", "", ""])
+    run(monkeypatch, tmp_path, [str(out), "02", "", "2", "n", "", ""])
     assert len(list(tmp_path.glob("작업_메뉴입력_*[0-9].xlsx"))) == 1
     assert len(list(tmp_path.glob("작업_메뉴입력_*_메뉴입력_*.xlsx"))) == 0
 
@@ -57,7 +60,7 @@ def test_unreachable_target_is_reported_as_failure(tmp_path, monkeypatch, capsys
     wb = load_workbook(book)
     wb["02_빈시트"]["D6"] = "http://127.0.0.1:9/"     # nothing listens on the discard port
     wb.save(book)
-    run(monkeypatch, tmp_path, [str(book), "02", "", "1", "n", "", ""])
+    run(monkeypatch, tmp_path, [str(book), "02", "", "2", "n", "", ""])
     out = capsys.readouterr().out
     assert "수집 실패" in out and not list(tmp_path.glob("작업_메뉴입력_*[0-9].xlsx"))
 
@@ -137,7 +140,7 @@ def test_script_menus_on_a_legacy_english_site_are_filled(tmp_path, monkeypatch)
         wb = load_workbook(book)
         wb["02_빈시트"]["D6"] = f"http://127.0.0.1:{server.server_address[1]}/"
         wb.save(book)
-        run(monkeypatch, tmp_path, [str(book), "02", "", "1", "n", "", "", ""])
+        run(monkeypatch, tmp_path, [str(book), "02", "", "2", "n", "", "", ""])
         out = next(tmp_path.glob("작업_메뉴입력_*[0-9].xlsx"))
         ws = load_workbook(out)["02_빈시트"]
         cols = [[ws.cell(r, c).value for r in (13, 14, 15)] for c in range(8, 30) if ws.cell(13, c).value]
@@ -185,7 +188,64 @@ def test_google_sheet_is_the_default_when_connected(site, tmp_path, monkeypatch)
 
     monkeypatch.setattr(gsheet, "load_config", lambda: {"url": "https://script.google.com/macros/s/x/exec", "token": "k"})
     monkeypatch.setattr(gsheet.Client, "call", call)
-    run(monkeypatch, tmp_path, ["", "05", "", "1", "n", "", "", "", ""])
+    run(monkeypatch, tmp_path, ["", "05", "", "2", "n", "", "", "", ""])
     assert ("fill", True) in calls and ("fill", False) in calls
     assert any(m[0] == "고객센터" for m in sheet["menus"]) and sheet["menus"][0] == ["기존 메뉴", "", ""]
     assert not list(tmp_path.glob("*_메뉴입력_*.xlsx"))           # no Excel copy in Google mode
+
+
+def test_auto_mode_logs_in_only_when_the_site_shows_just_a_login_screen(site, tmp_path, monkeypatch):  # noqa: F811
+    asked_login = []
+    monkeypatch.setattr(cli, "login_step", lambda job, config, username=None: asked_login.append(config.url) or False)
+    book = book_with_domains(tmp_path / "작업.xlsx")
+    wb = load_workbook(book)
+    wb["02_빈시트"]["D6"] = site                      # public menus visible -> no login step
+    wb.save(book)
+    run(monkeypatch, tmp_path, [str(book), "02", "", "1", "n", "", "", "", ""])
+    assert asked_login == []
+
+
+def test_needs_login_rules():
+    def report(menus, pages=()):
+        return {"menus": menus, "pages": list(pages)}
+    def menu(path, evidence="메뉴 DOM", status="수집됨", kind="link"):
+        return {"path": path, "evidence": evidence, "status": status, "kind": kind, "ready": status == "수집됨",
+                "hierarchy_review": False, "id": "/".join(path), "url": "", "visibility": ""}
+    login_only = report([menu(["Login", "Forgot User ID"], "로그인 화면"), menu(["Login", "Forgot Password"], "로그인 화면")])
+    assert cli.needs_login(login_only)
+    public = report([menu(["Login", "Forgot User ID"], "로그인 화면")] + [menu([f"메뉴{i}"]) for i in range(5)])
+    assert not cli.needs_login(public)
+    assert cli.needs_login(report([]))
+
+
+def test_auto_mode_goes_to_login_for_a_login_only_site(tmp_path, monkeypatch):
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    page = ("<html lang='en'><body><div class='login'><form method='post' action='/login'><input name='id'>"
+            "<input type='password' name='pw'><button type='submit'>Login</button></form>"
+            "<a href='/find-id'>Forgot User ID</a> <a href='/find-pw'>Forgot Password</a></div></body></html>")
+
+    class LoginOnly(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(page.encode())
+
+        def log_message(self, *a):
+            pass
+    server = ThreadingHTTPServer(("127.0.0.1", 0), LoginOnly)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    asked = []
+    monkeypatch.setattr(cli, "login_step", lambda job, config, username=None: asked.append(config.url) or False)
+    try:
+        book = book_with_domains(tmp_path / "작업.xlsx")
+        wb = load_workbook(book)
+        wb["02_빈시트"]["D6"] = f"http://127.0.0.1:{server.server_address[1]}/"
+        wb.save(book)
+        run(monkeypatch, tmp_path, [str(book), "02", "", "1", "n", "", "", "", ""])
+        assert len(asked) == 1                       # the login step was offered for this target
+        ws = load_workbook(next(tmp_path.glob("작업_메뉴입력_*[0-9].xlsx")))["02_빈시트"]
+        assert [ws["H13"].value, ws["H14"].value] == ["Login", "Forgot User ID"]       # login functions first
+    finally:
+        server.shutdown()

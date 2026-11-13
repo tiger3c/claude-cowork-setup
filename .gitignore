@@ -14,3 +14,4 @@ artifacts/
 *.tsv
 google_sheet.json
 last_run.json
+browser_profile/

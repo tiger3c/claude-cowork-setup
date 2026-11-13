@@ -291,3 +291,33 @@ def test_auto_mode_goes_to_login_for_a_login_only_site(tmp_path, monkeypatch):
         assert [ws["H13"].value, ws["H14"].value] == ["Login", "Forgot User ID"]       # login functions first
     finally:
         server.shutdown()
+
+
+def test_my_browser_mode_attaches_crawls_and_leaves_the_browser_open(site, tmp_path, monkeypatch):  # noqa: F811
+    from menu_crawler import mybrowser
+    from playwright.sync_api import sync_playwright
+    if not launch_options():
+        pytest.skip("needs MENU_CRAWLER_BROWSER_PATH")
+    port = 9300 + os.getpid() % 500
+    monkeypatch.setattr(mybrowser, "PORT", port)
+    monkeypatch.setattr(mybrowser, "PROFILE", tmp_path / "browser_profile")
+    book = book_with_domains(tmp_path / "작업.xlsx")
+    wb = load_workbook(book)
+    wb["02_빈시트"]["D6"] = site
+    wb.save(book)
+    try:
+        mybrowser.start(site + "/notice", headless=True)          # the user's own window with a tab of theirs
+        if launch_options():
+            monkeypatch.setenv("MENU_CRAWLER_BROWSER_PATH", launch_options()["executable_path"])
+        monkeypatch.chdir(tmp_path)
+        scripted(monkeypatch, [str(book), "02", "", "2", "n", "", "", "", ""])
+        cli.main(["--my-browser", "--headless", "--wait-ms", "0", "--delay-ms", "0"])
+        ws = load_workbook(next(tmp_path.glob("작업_메뉴입력_*[0-9].xlsx")))["02_빈시트"]
+        assert "고객센터" in [ws.cell(13, c).value for c in range(8, 14)]
+        assert mybrowser.running(port)                             # the browser is still open
+        with sync_playwright() as pw:
+            urls = [p.url for p in pw.chromium.connect_over_cdp(mybrowser.endpoint(port)).contexts[0].pages]
+        assert any(u.endswith("/notice") for u in urls)           # the user's tab is untouched, ours is closed
+        assert not any(u.rstrip("/") == site for u in urls)
+    finally:
+        subprocess.run(["pkill", "-f", str(tmp_path / "browser_profile")], check=False)

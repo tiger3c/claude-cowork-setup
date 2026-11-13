@@ -30,6 +30,7 @@ class CrawlConfig(BaseModel):
     browser: Literal["auto", "msedge", "chrome", "chromium"] = "auto"
     menu_selector: str = Field(default="", max_length=500)
     path_prefix: str = Field(default="", max_length=500)   # only pages under this path (several services on one host)
+    cdp_url: str = Field(default="", max_length=200)      # attach to the user's own browser (http://127.0.0.1:9222)
     click_menus: bool = True       # open script (javascript:) menus by clicking them, never logout/delete-like names
     headless: bool = False
 

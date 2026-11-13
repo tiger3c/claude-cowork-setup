@@ -22,7 +22,7 @@ from pydantic import ValidationError
 
 from .crawler import Job
 from . import workbook as diag
-from . import gsheet, netcheck, state, ui
+from . import gsheet, mybrowser, netcheck, state, ui
 from .boards import ExcelBoard, Filled, PasteBoard, SheetsBoard
 from .gsheet import SheetError
 from .ui import ask, ask_int, ask_yes
@@ -148,6 +148,13 @@ def build_config(args):
         print("  ※ 로그인할 수 있는 방식이라 브라우저 창을 띄워서 실행합니다.")
     args.auto_login = mode == "auto"
 
+    if mode != "public" and interactive:
+        ask_login_window(args)
+    if args.my_browser:
+        try:
+            settings["cdp_url"] = mybrowser.start(url, headless=args.headless)
+        except RuntimeError as exc:
+            sys.exit(str(exc))
     try:
         config = CrawlConfig(url=url, mode=engine_mode(mode), site_name=name[:120], login_url=login_url, extra_hosts=args.extra_host,
                              browser=args.browser, menu_selector=args.selector, headless=headless, **settings)
@@ -244,7 +251,10 @@ class Account:
 
 def login_step(job, config, username=None):
     title("로그인 단계")
-    print("  1. 열린 브라우저 창에서 로그인하세요. 보안문자·OTP·추가 인증까지 마칩니다.")
+    if config.cdp_url:
+        print("  1. 내 브라우저 창(수집기가 연 Edge/Chrome)의 새 탭에서 로그인하세요. 인증서·OTP·보안 프로그램도 그 창에서 처리합니다.")
+    else:
+        print("  1. 열린 브라우저 창에서 로그인하세요. 보안문자·OTP·추가 인증까지 마칩니다.")
     print("  2. 로그인된 화면이 보이면 여기서 Enter를 누르세요.")
     print("  ※ 아이디·비밀번호는 파일·엑셀·기록에 저장하지 않습니다.")
     print("  " + run_command(job, "goto", url=config.login_url or config.url)["message"])
@@ -801,6 +811,7 @@ def parse_args(argv=None):
     p.add_argument("--browser", choices=["auto", "msedge", "chrome", "chromium"], default="auto")
     p.add_argument("--headless", action="store_true", help="브라우저 창 없이 실행 (로그인 전 수집만)")
     p.add_argument("--no-click", action="store_true", help="javascript: 메뉴를 눌러 보지 않음")
+    p.add_argument("--my-browser", action="store_true", help="내 브라우저 창에서 로그인 (인증서·OTP·보안 프로그램이 필요한 사이트)")
     p.add_argument("-y", "--yes", action="store_true", help="확인 질문 없이 바로 실행 (점검 권한 확인 완료로 간주)")
     p.add_argument("--no-open", action="store_true", help="저장 후 엑셀을 자동으로 열지 않음")
     p.add_argument("--workbook", default="", help="메뉴를 입력할 진단 엑셀(.xlsx) 경로")
@@ -847,6 +858,18 @@ def choose_menus(confirmed, unverified, args, interactive):
     return diag.tidy(confirmed + [d for d, _ in unverified] if args.include_unverified else confirmed)
 
 
+
+
+def ask_login_window(args):
+    if args.my_browser:
+        return
+    print()
+    print("  로그인할 창")
+    print("    1) 수집기 창 (기본)   " + ui.dim("아이디/비밀번호, 문자·앱 OTP"))
+    print("    2) 내 브라우저 창     " + ui.dim("공동·금융인증서, 키보드 보안 등 보안 프로그램, 자동화 창을 막는 사이트"))
+    args.my_browser = ask("  번호", "1") == "2"
+    if args.my_browser:
+        print("  " + ui.dim("Edge/Chrome을 수집기 전용 프로필(browser_profile)로 엽니다. 보안 프로그램·확장은 그 창에서 한 번만 설치하면 됩니다."))
 
 
 def engine_mode(mode):
@@ -940,6 +963,7 @@ def campaign(args):
     ui.step(3, 3, "수집 방식 (모든 대상 공통)")
     mode = ask_mode(args.mode, default="1")
     if mode != "public":
+        ask_login_window(args)
         print()
         print("  " + ui.dim("로그인 페이지는 보통 점검 주소에서 바로 이동할 수 있습니다."))
         if ask_yes("  점검 주소와 다른 로그인 페이지 주소를 따로 지정할 대상이 있나요?", False):
@@ -1262,6 +1286,12 @@ def pick_plan(board, args, items):
 def run_target(i, total, t, url, login_url, mode, settings, board, args):
     """One 진단 대상: crawl -> save the menu list -> fill the 진단 시트. -> (Filled, menus, result file, url)."""
     ui.header(f"[{i}/{total}] {t.name or t.sheet}", f"{t.sheet}  {url}")
+    if args.my_browser:
+        try:
+            settings = {**settings, "cdp_url": mybrowser.start(url, headless=args.headless)}
+        except RuntimeError as exc:
+            ui.fail(str(exc))
+            return Filled(t, "실패"), 0, "", url
     try:
         config = CrawlConfig(url=url, mode=engine_mode(mode), site_name=(t.name or t.sheet or urlsplit(url).hostname or "메뉴 수집")[:120],
                              login_url=login_url, extra_hosts=args.extra_host, browser=args.browser,

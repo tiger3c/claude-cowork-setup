@@ -102,6 +102,8 @@ class Crawler:
 
     def open(self):
         self.pw = sync_playwright().start()
+        if self.config.cdp_url:
+            return self.attach()
         choices = ["msedge", "chrome", "chromium"] if self.config.browser == "auto" else [self.config.browser]
         # Optional: a specific Chromium binary (offline PCs, test machines).
         custom = os.environ.get("MENU_CRAWLER_BROWSER_PATH", "")
@@ -142,9 +144,17 @@ class Crawler:
         # they stay open: certificate / 2FA windows are part of logging in.
         if self.closing_popups and page is not self.page:
             try:
-                page.close()
+                opener = page.opener()
             except BrowserError:
-                pass
+                opener = None
+            mine = getattr(self, "own_pages", [self.page]) + [self.page]
+            if opener is None and getattr(self, "attached", False):
+                return                       # a tab the user opened in their own browser: leave it
+            if opener is None or opener in mine:
+                try:
+                    page.close()
+                except BrowserError:
+                    pass
 
     def page_functions(self, page, prefixes):
         """Tabs / choices inside an opened page become the next depth of the menu that opened it."""
@@ -254,9 +264,36 @@ class Crawler:
             return "수집 브라우저가 닫혔습니다. 브라우저 열기부터 다시 시작하세요."
         return "페이지 접속 또는 화면 읽기에 실패했습니다. 브라우저에서 해당 주소를 확인하세요."
 
+    def attach(self):
+        """Work inside the user's own browser window (logged in with certificates / OTP / security programs).
+        Only a new tab of ours is used and closed; the user's browser and its other tabs stay as they are."""
+        try:
+            self.browser = self.pw.chromium.connect_over_cdp(self.config.cdp_url, timeout=15000)
+        except BrowserError as exc:
+            raise RuntimeError("내 브라우저에 연결하지 못했습니다. 수집기가 연 브라우저 창이 열려 있는지 확인하세요.") from exc
+        self.attached = True
+        self.context = self.browser.contexts[0] if self.browser.contexts else self.browser.new_context()
+        self.context.on("page", self.on_page)
+        self.page = self.context.new_page()
+        self.own_pages = [self.page]
+        self.page.set_default_timeout(self.config.timeout_ms)
+        first = self.config.login_url if self.config.mode == "login" and self.config.login_url else self.config.url
+        try:
+            self.page.goto(first, wait_until="domcontentloaded", timeout=self.config.timeout_ms)
+        except BrowserError as exc:
+            self.issue("시작 페이지 접속 실패", first, self.error_text(exc))
+        self.emit("ready", "내 브라우저 창에 새 탭을 열었습니다. 그 창에서 로그인하면 로그인 상태로 수집합니다.")
+
     def close(self):
         try:
-            if self.browser:
+            if getattr(self, "attached", False):
+                for page in getattr(self, "own_pages", []) + ([self.page] if self.page else []):
+                    try:
+                        if not page.is_closed():
+                            page.close()
+                    except BrowserError:
+                        pass
+            elif self.browser:
                 self.browser.close()
         finally:
             if self.pw:

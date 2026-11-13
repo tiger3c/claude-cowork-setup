@@ -777,7 +777,7 @@ MATCH_REASON = {4: "대표 도메인 일치", 3: "대표 도메인보다 위 주
 
 
 def _base(path):
-    """'/app/index.jsp' -> '/app'; '/global.shinhan' stays (a context path, not a page file)."""
+    """'/app/index.jsp' -> '/app'; '/global.app' stays (a context path, not a page file)."""
     head, _, last = path.rpartition("/")
     return head if PAGE_FILE.search(last) else path
 

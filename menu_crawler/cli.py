@@ -540,7 +540,7 @@ def choose_board(args, interactive):
             linked = bool(all_connections())
             last = "" if linked else state.last_workbook()
             if linked:
-                print("  " + ui.bold("Enter = 구글 시트에 바로 입력") + ui.dim("  (연결된 진단표, 값만 입력)"))
+                print("  " + ui.bold("구글 시트 주소 붙여넣기 또는 Enter(지난번 시트)") + ui.dim("  = 구글 시트에 바로 입력, 값만 입력"))
                 print("  " + ui.dim("엑셀 파일로 하려면 파일을 끌어다 놓기 | p = 구글 시트 붙여넣기 | - = 기입 없이 수집만"))
             else:
                 print("  작업할 진단 엑셀 파일을 붙여넣어 주세요. (파일을 이 창에 끌어다 놓아도 됩니다)")
@@ -550,6 +550,8 @@ def choose_board(args, interactive):
                                     + ("- = 기입 없이 수집만" if last else "Enter = 기입 없이 수집만")))
             while True:
                 value = ask("  진단표" if linked else "  작업 엑셀").strip().strip('"').strip("'").strip()
+                if gsheet.sheet_ref(value):            # a Google Sheets address pasted right here
+                    args.sheet_url, value = value, "g"
                 if not value and linked:
                     value = "g"
                 if not value and last:
@@ -563,7 +565,7 @@ def choose_board(args, interactive):
                 elif Path(value).is_file() and value.lower().endswith((".xlsx", ".xlsm")):
                     kind, path = "excel", value
                 else:
-                    print("  .xlsx 또는 .xlsm 파일을 붙여넣어 주세요. 경로가 맞는지, 파일이 있는지 확인하세요.")
+                    print("  구글 시트 주소(https://docs.google.com/spreadsheets/...)나 .xlsx/.xlsm 파일 경로를 넣어 주세요.")
                     continue
                 break
     if kind == "gsheet":

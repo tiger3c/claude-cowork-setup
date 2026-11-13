@@ -215,7 +215,7 @@ def test_google_sheet_full_flow_and_rerun(site, tmp_path, monkeypatch, gas):  # 
     assert not sheet["writes"][0].startswith("H")                                  # after the last used column
     assert {s["name"]: s for s in state()}["07_숨김"]["writes"] == []
     before = len(sheet["writes"])
-    run(monkeypatch, tmp_path, ["", url, "05", "", "2", "n", "", "", ""])          # rerun = additional investigation
+    run(monkeypatch, tmp_path, [url, "05", "", "2", "n", "", "", ""])              # address pasted at the first prompt
     assert len({s["name"]: s for s in state()}["05_사이트"]["writes"]) == before     # nothing new
     assert not list(tmp_path.glob("*_메뉴입력_*.xlsx"))
 

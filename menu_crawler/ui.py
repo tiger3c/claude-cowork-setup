@@ -201,3 +201,27 @@ def ask_int(prompt, default, low, high):
         if value.isdigit() and low <= int(value) <= high:
             return int(value)
         print(f"  {low}~{high} 사이 숫자를 입력하세요.")
+
+
+def beep():
+    """Get attention when the user is needed (login) or the run is over; silent where not supported."""
+    try:
+        if os.name == "nt":
+            import winsound
+            winsound.MessageBeep()
+        elif sys.stdout.isatty():
+            sys.stdout.write("\a")
+            sys.stdout.flush()
+    except (ImportError, RuntimeError, OSError):
+        pass
+
+
+def window_title(text):
+    """Progress in the console window title (visible in the taskbar while the user does other work)."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetConsoleTitleW(f"웹 메뉴 수집기 - {text}")
+    except (AttributeError, OSError):
+        pass

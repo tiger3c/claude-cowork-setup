@@ -83,10 +83,13 @@ class SheetsBoard:
             return Filled(target, "실패")
         ui.ok(f"구글 시트 ‘{target.sheet}’ {res['range']}에 {res['written']}개 입력했습니다."
               + (" 대표 도메인(D6)도 적었습니다." if res.get("domainSaved") else ""))
+        if res.get("url"):
+            print("  " + ui.dim("바로 보기: " + res["url"]))
         record = diag.Plan(target.sheet, [], res["existing"], list(zip(range(res["start"], res["start"] + res["written"]), res["write"])),
                            res["duplicates"], res["overflow"])
         rec = diag.receipt(record, Path(out_dir) / f"구글시트입력_{_safe(target.sheet)}_{datetime.now():%Y%m%d_%H%M%S}_입력내역.tsv")
-        return Filled(target, "입력 완료", res["range"], res["written"], len(res["duplicates"]), len(res["overflow"]), str(rec))
+        return Filled(target, "입력 완료", res["range"], res["written"], len(res["duplicates"]), len(res["overflow"]),
+                      res.get("url") or str(rec))
 
 
 class PasteBoard:

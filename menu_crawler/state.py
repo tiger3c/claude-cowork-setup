@@ -64,3 +64,18 @@ def remember_sheet_connection(sheet, connection_url):
         FILE.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
     except OSError:
         pass
+
+
+def pref(key, default=""):
+    return _load().get("prefs", {}).get(key, default)
+
+
+def remember(key, value):
+    if os.environ.get("MENU_CRAWLER_NO_STATE"):
+        return
+    try:
+        data = _load()
+        data.setdefault("prefs", {})[key] = value
+        FILE.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    except OSError:
+        pass

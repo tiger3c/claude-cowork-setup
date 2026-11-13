@@ -227,6 +227,7 @@ def test_google_sheet_skips_merges_formulas_and_hidden_columns(tmp_path, gas):
     client = gsheet.Client(f"http://127.0.0.1:{port}/", "k", spreadsheet=f"https://docs.google.com/spreadsheets/d/{BOOK}/edit")
     res = client.fill("06_병합", [["기존", "탈퇴"], ["새1"], ["새2"]])
     assert res["duplicates"] == [["기존", "탈퇴", ""]] and res["columns"] == [12, 13] and res["range"] == "L13:M15"
+    assert res["url"].endswith("/edit#gid=1000")
     cells = {x["name"]: x for x in state()}["06_병합"]["cells"]
     assert (cells["L13"], cells["M13"]) == ("새1", "새2") and "K13" not in cells and "J13" not in cells
     with pytest.raises(gsheet.SheetError, match="양식"):
@@ -378,3 +379,17 @@ def test_session_loss_after_login_is_detected():
         assert report["session_lost"] and report["visited_count"] <= 5
     finally:
         server.shutdown()
+
+
+def test_last_targets_and_mode_are_reused_with_enter(site, tmp_path, monkeypatch):  # noqa: F811
+    from menu_crawler import state
+    monkeypatch.setattr(state, "FILE", tmp_path / "last_run.json")
+    book = book_with_domains(tmp_path / "작업.xlsx")
+    wb = load_workbook(book)
+    wb["02_빈시트"]["D6"] = site
+    wb.save(book)
+    monkeypatch.delenv("MENU_CRAWLER_NO_STATE")
+    run(monkeypatch, tmp_path, [str(book), "02", "", "2", "n", "", ""])
+    assert state.pref("targets") == "02" and state.pref("mode") == "public"
+    asked = run(monkeypatch, tmp_path, [str(book), "", "", "", "n", "", ""])     # Enter = last targets, last mode
+    assert any("지난번 02" in a for a in asked) and any("번호 [2]" in a for a in asked)

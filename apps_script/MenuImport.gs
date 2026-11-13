@@ -121,6 +121,8 @@ function fillSheet(ss, req) {
     var p = planFill(area.menus, area.results, req.menus || [], area.lastCol, hidden);
     p.ok = true;
     p.sheet = req.sheet;
+    p.gid = sh.getSheetId();
+    p.url = ss.getUrl().replace(/#.*$/, '') + '#gid=' + p.gid;
     p.range = p.columns.length ? colName(p.columns[0]) + MENU_ROW + ':' + colName(p.columns[p.columns.length - 1]) + (MENU_ROW + 2) : '';
     if (!req.dryRun && p.write.length) {
       // contiguous runs of columns (a hidden column splits a run); values only, formats stay

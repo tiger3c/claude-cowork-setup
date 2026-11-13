@@ -19,7 +19,7 @@ class Sheet {
     this.hiddenCols = new Set((d.hiddenCols || []).map(col));
     this.writes = [];
   }
-  getName() { return this.name; } isSheetHidden() { return this.hidden; }
+  getName() { return this.name; } isSheetHidden() { return this.hidden; } getSheetId() { return this.gid; }
   getMaxColumns() { return this.maxCols; } getMaxRows() { return this.maxRows; }
   isColumnHiddenByUser(c) { return this.hiddenCols.has(c); }
   getRange(r, c, nr, nc) {
@@ -53,7 +53,7 @@ class Range {
 }
 const books = {};
 for (const [id, b] of Object.entries(fixture.books)) {
-  const sheets = b.sheets.map(s => new Sheet(s));
+  const sheets = b.sheets.map((s, i) => Object.assign(new Sheet(s), { gid: 1000 + i }));
   books[id] = { getName: () => b.name, getUrl: () => `https://docs.google.com/spreadsheets/d/${id}/edit`, getSheets: () => sheets,
                 getSheetByName: n => sheets.find(s => s.name === n) || null, sheets };
 }

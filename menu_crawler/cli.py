@@ -77,6 +77,8 @@ def ask_url(initial, prompt="수집할 사이트 주소 (예: https://www.exampl
 def ask_mode(initial, default="1"):
     if initial:
         return initial
+    last = state.pref("mode")
+    default = next((k for k, m in MODE_KEYS.items() if m == last), default)
     print()
     print("  수집 방식을 선택하세요.")
     for key, mode in MODE_KEYS.items():
@@ -84,6 +86,7 @@ def ask_mode(initial, default="1"):
     while True:
         value = ask("  번호", default)
         if value in MODE_KEYS:
+            state.remember("mode", MODE_KEYS[value])
             return MODE_KEYS[value]
         print("  1~4 중에서 선택하세요.")
 
@@ -111,10 +114,13 @@ def advanced_settings(args, settings, interactive):
     if not interactive:
         return
     print()
-    print("  고급 설정 " + ui.dim("(보통은 그대로 두면 됩니다)"))
-    show_settings(args, settings)
-    if not ask_yes("  고급 설정을 바꿀까요?", False):
+    short = (f"페이지 {'제한 없음' if not settings['max_pages'] else settings['max_pages']} · "
+             f"시간 {'제한 없음' if not settings['max_seconds'] else str(settings['max_seconds']) + '초'} · "
+             f"메뉴 눌러 보기 {'켜짐' if settings['click_menus'] else '꺼짐'} · 메뉴 영역 {args.selector or '자동'}")
+    print("  고급 설정: " + ui.dim(short))
+    if not ask_yes("  고급 설정을 보거나 바꿀까요? (보통은 그대로)", False):
         return
+    show_settings(args, settings)
     print("  " + ui.dim("Enter = 지금 값 그대로"))
     settings["max_pages"] = ask_int("    방문 페이지 수 (0 = 제한 없음)", settings["max_pages"], 0, 100000)
     settings["max_seconds"] = ask_int("    수집 시간, 초 (0 = 제한 없음, 예: 600 = 10분)", settings["max_seconds"], 0, 172800)
@@ -251,6 +257,8 @@ class Account:
 
 def login_step(job, config, username=None):
     title("로그인 단계")
+    ui.beep()
+    ui.window_title("로그인이 필요합니다")
     if config.cdp_url:
         print("  1. 내 브라우저 창(수집기가 연 Edge/Chrome)의 새 탭에서 로그인하세요. 인증서·OTP·보안 프로그램도 그 창에서 처리합니다.")
     else:
@@ -870,7 +878,8 @@ def ask_login_window(args):
     print("  로그인할 창")
     print("    1) 수집기 창 (기본)   " + ui.dim("아이디/비밀번호, 문자·앱 OTP"))
     print("    2) 내 브라우저 창     " + ui.dim("공동·금융인증서, 키보드 보안 등 보안 프로그램, 자동화 창을 막는 사이트"))
-    args.my_browser = ask("  번호", "1") == "2"
+    args.my_browser = ask("  번호", "2" if state.pref("my_browser") else "1") == "2"
+    state.remember("my_browser", args.my_browser)
     if args.my_browser:
         print("  " + ui.dim("Edge/Chrome을 수집기 전용 프로필(browser_profile)로 엽니다. 보안 프로그램·확장은 그 창에서 한 번만 설치하면 됩니다."))
 
@@ -1034,6 +1043,7 @@ RETRY = {"수집 실패", "실패", "중단", "건너뜀", "실행 안 함", "�
 def run_plan(plan, items, mode, settings, board, args):
     """Crawl and fill the planned targets in order. -> (rows for the result table, stop exception or None)."""
     done, idx, current, stop = [], 0, None, None
+    started = time.monotonic()
     try:
         while idx < len(plan):
             t, url, login_url = plan[idx]
@@ -1047,6 +1057,7 @@ def run_plan(plan, items, mode, settings, board, args):
                     idx += 1
                     continue
             current = (t, url)
+            ui.window_title(f"[{idx + 1}/{len(plan)}] {t.sheet} 수집 중")
             try:
                 scope = diag.crawl_scope(t, url, items)
                 if scope:
@@ -1068,6 +1079,11 @@ def run_plan(plan, items, mode, settings, board, args):
             done.append((Filled(current[0], "중단"), 0, "", current[1]))
             idx += 1
     done += [(Filled(t, "실행 안 함"), 0, "", url) for t, url, _ in plan[idx:]]
+    minutes, seconds = divmod(int(time.monotonic() - started), 60)
+    print()
+    print("  " + ui.dim(f"걸린 시간: {minutes}분 {seconds}초 · 대상 {len(plan)}개"))
+    ui.window_title("작업 끝")
+    ui.beep()
     return done, stop
 
 
@@ -1097,6 +1113,9 @@ def report(done, board, mode, args, stop=None, offer_open=True):
         if any(f.status == "입력 완료" for f, _, _, _ in done):
             ui.ok(f"구글 시트 '{board.title}':")
             print("  " + board.client.spreadsheet)
+            for f, _, _, _ in done:
+                if f.status == "입력 완료" and f.file.startswith("http"):
+                    ui.say(ui.dim(f"{f.target.sheet}: {f.file}"), indent="    ")
             if os.name == "nt" and offer_open and not args.no_open and not args.yes and stop is None and ask_yes("  구글 시트를 브라우저로 열까요?", True):
                 import webbrowser
                 webbrowser.open(board.client.spreadsheet)
@@ -1294,13 +1313,19 @@ def pick_plan(board, args, items):
         for url in urls:
             add(t, ask_url(url))
 
+    last_targets = state.pref("targets") if items else ""
     while True:
-        raw = ask("  대상" if not plan else "  추가 대상 (다 입력했으면 Enter)")
+        raw = ask("  대상" + (f" (Enter = 지난번 {last_targets})" if last_targets and not plan else "")
+                  if not plan else "  추가 대상 (다 입력했으면 Enter)")
+        if not raw and not plan and last_targets:
+            raw, last_targets = last_targets, ""
         if not raw:
             if plan:
                 return plan
             print("  대상을 하나 이상 입력하세요.")
             continue
+        if not re.match(r"https?://", raw.strip(), re.I):
+            state.remember("targets", raw.strip())
         if raw.strip() in {"?", "？"}:
             show_targets(items)
             continue

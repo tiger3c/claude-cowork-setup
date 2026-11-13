@@ -616,3 +616,91 @@ def test_menus_can_be_left_out_before_the_google_fill(site, tmp_path, monkeypatc
         ui.pick_numbers("0", 5)
     with pytest.raises(ValueError):
         ui.pick_numbers("a", 5)
+
+
+def test_page_keeps_loading_while_the_user_logs_in(tmp_path):
+    """While the crawler waits for the user (login step), the page's own requests must not be held back."""
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from menu_crawler.crawler import Job
+    from menu_crawler.models import CrawlConfig
+    seen = []
+    page = ("<html><body><form><input name=id><input type=password name=pw><button type=submit>Login</button></form>"
+            "<script>setTimeout(() => fetch('/late-screen.xml'), 400); setTimeout(() => fetch('/late-post', {method: 'POST'}), 600);"
+            "</script></body></html>")
+
+    class Lazy(BaseHTTPRequestHandler):
+        def respond(self):
+            seen.append((self.command, self.path))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(page.encode() if self.path == "/" else b"ok")
+
+        do_GET = do_POST = respond
+
+        def log_message(self, *a):
+            pass
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Lazy)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    job = Job(CrawlConfig(url=f"http://127.0.0.1:{server.server_address[1]}/", mode="login", headless=True,
+                          browser="chromium", wait_ms=0, delay_ms=0))
+    try:
+        end = time.monotonic() + 20
+        while job.snapshot()["state"] != "ready" and time.monotonic() < end:
+            time.sleep(0.1)
+        time.sleep(2)                                   # the user is logging in; the crawler is idle
+        assert ("GET", "/late-screen.xml") in seen     # screens that load after the first paint (WebSquare) arrive
+        assert ("POST", "/late-post") in seen           # the login request itself is not blocked either
+    finally:
+        job.close()
+        job.thread.join(timeout=10)
+        server.shutdown()
+
+
+def test_post_navigation_is_blocked_by_default_and_can_be_allowed():
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from menu_crawler.crawler import Crawler
+    from menu_crawler.models import CrawlConfig
+    home = """<html><head><script>function goMenu(u){ const f = document.createElement('form'); f.method = 'post'; f.action = u;
+ document.body.appendChild(f); f.submit(); }</script></head><body><nav><ul>
+<li><a href="javascript:goMenu('/screen.do')">계좌조회</a></li>
+<li><a href="javascript:goMenu('/transfer.do')">빠른메뉴</a></li></ul></nav></body></html>"""
+    seen = []
+
+    class PostNav(BaseHTTPRequestHandler):
+        def respond(self):
+            seen.append((self.command, self.path))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write((home if self.path == "/" else "<html><body><h1>화면</h1></body></html>").encode())
+
+        do_GET = do_POST = respond
+
+        def log_message(self, *a):
+            pass
+    server = ThreadingHTTPServer(("127.0.0.1", 0), PostNav)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    def crawl(**extra):
+        seen.clear()
+        engine = Crawler(CrawlConfig(url=f"http://127.0.0.1:{server.server_address[1]}/", headless=True, browser="chromium",
+                                     wait_ms=0, delay_ms=0, **extra))
+        engine.open()
+        try:
+            engine.crawl("before")
+            return {m["path"][0]: m for m in engine.snapshot()["menus"]}
+        finally:
+            engine.close()
+    try:
+        menus = crawl()
+        assert [p for m, p in seen if m == "POST"] == []
+        assert menus["계좌조회"]["status"] == "동작 확인 필요" and "안전장치" in menus["계좌조회"]["reason"]   # not shown as confirmed
+        menus = crawl(allow_post_nav=True)
+        assert [p for m, p in seen if m == "POST"] == ["/screen.do"]                                   # transfer stays blocked
+        assert menus["계좌조회"]["status"] == "수집됨" and menus["빠른메뉴"]["status"] == "동작 확인 필요"
+    finally:
+        server.shutdown()

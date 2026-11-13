@@ -94,7 +94,8 @@ def ask_mode(initial, default="1"):
 
 def base_settings(args):
     return {"max_pages": args.max_pages, "max_seconds": args.max_seconds, "max_hops": args.max_hops,
-            "wait_ms": args.wait_ms, "delay_ms": args.delay_ms, "click_menus": not args.no_click}
+            "wait_ms": args.wait_ms, "delay_ms": args.delay_ms, "click_menus": not args.no_click,
+            "allow_post_nav": args.allow_post_nav}
 
 
 def show_settings(args, s):
@@ -104,6 +105,7 @@ def show_settings(args, s):
         ["링크 깊이", f"{s['max_hops']}단계", "메뉴에서 링크를 몇 번까지 따라 들어갈지"],
         ["페이지 간격", f"{s['delay_ms'] / 1000:g}초", "다음 페이지를 열기 전 쉬는 시간 (서버 부담이 걱정되면 늘림)"],
         ["메뉴 눌러 보기", "켜짐" if s["click_menus"] else "꺼짐", "javascript: 메뉴를 눌러 열리는 화면과 탭까지 확인"],
+        ["POST 화면 이동", "허용" if s["allow_post_nav"] else "막음", "메뉴가 POST로 화면을 여는 사이트에서만 허용 (이체·삭제 같은 주소는 계속 막음)"],
         ["메뉴 영역", args.selector or "자동으로 찾기", "메뉴를 못 찾을 때만 CSS 선택자 지정 (예: #topMenu)"],
         ["추가 호스트", ", ".join(args.extra_host) or "없음", "메뉴가 다른 주소(예: 별도 로그인 서버)로 이어질 때 함께 수집"],
     ]
@@ -128,6 +130,7 @@ def advanced_settings(args, settings, interactive):
     settings["max_hops"] = ask_int("    링크 깊이 (1~20)", settings["max_hops"], 1, 20)
     settings["delay_ms"] = ask_int("    페이지 간격, 밀리초 (300 = 0.3초)", settings["delay_ms"], 0, 5000)
     settings["click_menus"] = ask_yes("    javascript: 메뉴를 눌러 보기", settings["click_menus"])
+    settings["allow_post_nav"] = ask_yes("    POST로 화면을 여는 메뉴 허용 (결과에 '요청 차단'이 많을 때만)", settings["allow_post_nav"])
     args.selector = ask("    메뉴 영역 CSS 선택자 (없으면 Enter = 자동)", args.selector)
     while True:
         hosts = [h.strip() for h in ask("    추가 호스트 (쉼표로 구분, 없으면 Enter, 예: login.example.com)").split(",") if h.strip()]
@@ -342,6 +345,8 @@ STATUS_HELP = {
     "화면 읽기 실패": "열렸지만 메뉴 구조를 읽지 못함",
 }
 ISSUE_HELP = {
+    "요청 차단": ("수집 중 상태를 바꿀 수 있는 POST 요청을 안전장치가 막음",
+               "메뉴 화면이 안 열려서 생긴 것이면 고급 설정의 'POST 화면 이동'을 허용하고 다시 수집합니다. 이체·삭제 같은 주소는 계속 막습니다."),
     "이름 없는 링크": ("글자 없이 이미지·아이콘만 있는 링크", "메뉴라면 결과 엑셀 '미수집_확인필요' 시트에서 위치를 확인합니다."),
     "같은 페이지 반복": ("주소의 토큰·시각 값만 바뀐 같은 화면이 반복됨", "서로 다른 화면인데 이렇게 나오면 알려 주세요."),
     "로그인 필요": ("로그인 화면이 감지된 주소", "로그인 후 메뉴가 필요하면 수집 방식 4(전·후 비교)로 다시 수집합니다."),
@@ -861,6 +866,7 @@ def parse_args(argv=None):
     p.add_argument("--browser", choices=["auto", "msedge", "chrome", "chromium"], default="auto")
     p.add_argument("--headless", action="store_true", help="브라우저 창 없이 실행 (로그인 전 수집만)")
     p.add_argument("--no-click", action="store_true", help="javascript: 메뉴를 눌러 보지 않음")
+    p.add_argument("--allow-post-nav", action="store_true", help="메뉴가 POST로 화면을 여는 사이트: POST 화면 이동 허용 (동작 주소는 계속 차단)")
     p.add_argument("--my-browser", action="store_true", help="내 브라우저 창에서 로그인 (인증서·OTP·보안 프로그램이 필요한 사이트)")
     p.add_argument("--check", action="store_true", help="정리 점검: 이미 들어간 메뉴 열 중 잘못 들어간 열을 찾아 비움")
     p.add_argument("-y", "--yes", action="store_true", help="확인 질문 없이 바로 실행 (점검 권한 확인 완료로 간주)")

@@ -63,6 +63,8 @@ class Crawler:
         self.closing_popups = False
         self.guarding = False
         self.own_pages = []
+        self.guarded = []
+        self.blocked = 0
         self.issue_keys: set[tuple] = set()
         self.phase = "after" if config.mode == "login" else "before"
         self.pw = self.browser = self.context = self.page = None
@@ -160,8 +162,42 @@ class Crawler:
     def adopt(self, page):
         if page not in getattr(self, "own_pages", []):
             self.own_pages = getattr(self, "own_pages", []) + [page]
-            page.on("dialog", lambda dialog: dialog.dismiss())
-            page.route("**/*", self.guard)
+            page.on("dialog", self.on_dialog)
+            if self.guarding:
+                self.set_guard(page, True)
+
+    def on_dialog(self, dialog):
+        """alert/confirm: dismissed while crawling; while the user logs in they are the user's to answer."""
+        if not self.guarding:
+            return
+        try:
+            dialog.dismiss()
+        except BrowserError:
+            pass                                      # already answered by the user
+
+    def set_guard(self, page, on):
+        """The request guard is installed only while crawling. Requests are answered by this thread, so a guard
+        left on while the crawler waits for the user (login step) would hold back every request of the page."""
+        try:
+            if page.is_closed():
+                return
+            if on and page not in self.guarded:
+                page.route("**/*", self.guard)
+                self.guarded.append(page)
+            elif not on and page in self.guarded:
+                self.guarded.remove(page)
+                page.unroute("**/*", self.guard)
+        except BrowserError:
+            pass
+
+    def idle(self):
+        """Called while waiting for the user: lets the browser's events (new windows, dialogs) be processed."""
+        try:
+            page = next((p for p in self.mine() if not p.is_closed()), None)
+            if page is not None:
+                page.wait_for_timeout(50)
+        except BrowserError:
+            pass
 
     def guard(self, route, request):
         """While crawling, never let a click or a page send a request that may change state:
@@ -169,8 +205,12 @@ class Crawler:
         The login step is not guarded (the user logs in)."""
         if not self.guarding or request.method in {"GET", "HEAD", "OPTIONS"}:
             return route.continue_()
-        if request.resource_type == "document" or ACTION_URL.search(request.url):
-            self.issue("요청 차단", public_url(request.url), f"상태를 바꿀 수 있는 {request.method} 요청이라 보내지 않았습니다.")
+        action = bool(ACTION_URL.search(request.url))
+        if action or (request.resource_type == "document" and not self.config.allow_post_nav):
+            self.blocked += 1
+            self.issue("요청 차단", public_url(request.url),
+                       f"상태를 바꿀 수 있는 {request.method} 요청이라 보내지 않았습니다."
+                       + ("" if action else " (POST로 화면을 여는 메뉴라면 고급 설정에서 허용할 수 있습니다)"))
             return route.abort()
         return route.continue_()
 
@@ -192,7 +232,7 @@ class Crawler:
         if getattr(self, "attached", False):
             page.on("dialog", lambda dialog: None)  # the user's own tab: leave its dialogs to the user
             return
-        page.on("dialog", lambda dialog: dialog.dismiss())
+        page.on("dialog", self.on_dialog)
         # Crawler window: a window the site opens by itself (notices, events) is closed while crawling. During the
         # login step it stays open: certificate / 2FA windows are part of logging in.
         if self.closing_popups and opener is None:
@@ -261,7 +301,7 @@ class Crawler:
             tabs_before = set(page.main_frame.evaluate(PAGE_FUNCTIONS))
         except BrowserError:
             tabs_before = set()
-        before, start = list(self.context.pages), canonical_url(page.url)
+        before, start, blocked = list(self.context.pages), canonical_url(page.url), self.blocked
         self.closing_popups = False                  # a window this click opens is the menu's screen
         clicked = False
         try:
@@ -282,6 +322,9 @@ class Crawler:
             self.closing_popups = True
         if not clicked:
             menu.reason = "화면이 바뀌어 같은 메뉴를 찾지 못해 누르지 않았습니다."
+            return
+        if self.blocked > blocked:                    # the click wanted to send something the guard does not let out
+            menu.reason = "누르면 POST 요청을 보내는 메뉴라 안전장치가 막았습니다. 화면을 여는 메뉴라면 고급 설정에서 허용하세요."
             return
         opened = [p for p in self.context.pages if p not in before and not p.is_closed() and p in self.mine()]
         target = opened[0] if opened else page
@@ -592,10 +635,14 @@ class Crawler:
 
     def crawl(self, phase=None, resume=False):
         self.closing_popups = self.guarding = True
+        for page in self.mine():
+            self.set_guard(page, True)
         try:
             return self._crawl(phase, resume)
         finally:
             self.closing_popups = self.guarding = False
+            for page in list(self.guarded):
+                self.set_guard(page, False)
 
     def _crawl(self, phase=None, resume=False):
         if phase:
@@ -794,7 +841,11 @@ class Job:
         try:
             engine.open()
             while True:
-                command, args = self.commands.get()
+                try:
+                    command, args = self.commands.get(timeout=0.2)
+                except queue.Empty:
+                    engine.idle()                    # waiting for the user: keep the browser responsive
+                    continue
                 if command == "close":
                     break
                 if command == "crawl":
